@@ -1,0 +1,37 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Node / frontend
+node_modules/
+ui/dist/
+.vite/
+*.tsbuildinfo
+
+# Tauri
+apps/kova-screen/gen/
+apps/kova-screen/target/
+
+# Packaging output
+/dist/
+/artifacts/
+*.msi
+*.exe.sig
+
+# Local state that must never be committed
+*.local
+.env
+.env.*
+!.env.example
+secrets.json
+*.pem
+*.key
+
+# Editors / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
