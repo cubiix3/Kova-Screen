@@ -88,11 +88,18 @@ jobs:
           Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE portable/
           Compress-Archive -Path portable/* -DestinationPath "artifacts/Kova-Screen_${version}_x64-portable.zip" -Force
 
-          # Checksums, in the format `sha256sum -c` accepts.
+          # Checksums, in the format `sha256sum -c` accepts. Written with LF
+          # line endings via WriteAllText, because Set-Content would emit CRLF
+          # and `sha256sum -c` then reads the carriage return as part of the
+          # filename and reports every file as missing.
           Push-Location artifacts
-          Get-FileHash -Algorithm SHA256 * |
-            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
-            Set-Content -Encoding ascii SHA256SUMS.txt
+          $lines = Get-FileHash -Algorithm SHA256 * |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" }
+          [IO.File]::WriteAllText(
+            (Join-Path $PWD 'SHA256SUMS.txt'),
+            ($lines -join "`n") + "`n",
+            [Text.UTF8Encoding]::new($false)
+          )
           Get-Content SHA256SUMS.txt
           Pop-Location
 
