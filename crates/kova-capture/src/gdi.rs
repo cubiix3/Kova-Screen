@@ -203,6 +203,7 @@ mod tests {
 
     #[test]
     fn captures_a_small_region_with_the_requested_extent() {
+        crate::require_interactive_desktop!();
         let bmp = capture_rect(Rect::new(0, 0, 64, 32)).expect("capture 64x32");
         assert_eq!(bmp.width(), 64);
         assert_eq!(bmp.height(), 32);
@@ -212,6 +213,7 @@ mod tests {
 
     #[test]
     fn captured_pixels_are_fully_opaque() {
+        crate::require_interactive_desktop!();
         let bmp = capture_rect(Rect::new(0, 0, 32, 32)).unwrap();
         assert!(
             bmp.data().as_chunks::<4>().0.iter().all(|p| p[3] == 0xFF),
@@ -221,6 +223,7 @@ mod tests {
 
     #[test]
     fn captures_a_full_monitor() {
+        crate::require_interactive_desktop!();
         let m = monitor::primary().expect("a primary monitor");
         let bmp = capture_rect(m.bounds).expect("full monitor capture");
         assert_eq!(bmp.width(), m.bounds.width);
@@ -229,6 +232,7 @@ mod tests {
 
     #[test]
     fn captures_the_whole_virtual_desktop() {
+        crate::require_interactive_desktop!();
         let desktop = monitor::virtual_desktop_bounds().unwrap();
         let bmp = capture_rect(desktop).expect("virtual desktop capture");
         assert_eq!(bmp.size(), desktop.size());
@@ -236,6 +240,7 @@ mod tests {
 
     #[test]
     fn a_region_running_off_screen_is_clamped_rather_than_failing() {
+        crate::require_interactive_desktop!();
         let desktop = monitor::virtual_desktop_bounds().unwrap();
         let overhang = Rect::new(desktop.right() - 10, desktop.y, 500, 100);
         let bmp = capture_rect(overhang).expect("clamped capture");
@@ -256,6 +261,7 @@ mod tests {
 
     #[test]
     fn repeated_captures_do_not_leak_gdi_handles() {
+        crate::require_interactive_desktop!();
         // Each capture allocates a screen DC, a memory DC and a DIB. If any is
         // leaked the process handle count climbs and later captures eventually
         // fail outright. 200 iterations is far more than the ~3 handle delta a

@@ -234,6 +234,7 @@ mod tests {
 
     #[test]
     fn captures_the_primary_monitor_at_its_full_extent() {
+        crate::require_interactive_desktop!();
         let m = monitor::primary().expect("a primary monitor");
         let bmp = capture_monitor(m.id).expect("wgc monitor capture");
         // WGC reports the monitor extent, which must match what we enumerated.
@@ -257,6 +258,7 @@ mod tests {
 
     #[test]
     fn cropping_yields_exactly_the_requested_extent() {
+        crate::require_interactive_desktop!();
         let m = monitor::primary().expect("a primary monitor");
         let item = item_for_monitor(m.id).unwrap();
         let bmp = capture_item(&item, Some(Rect::new(10, 10, 100, 50))).expect("cropped capture");
@@ -266,6 +268,7 @@ mod tests {
 
     #[test]
     fn an_oversized_crop_is_clamped_to_the_frame() {
+        crate::require_interactive_desktop!();
         let m = monitor::primary().expect("a primary monitor");
         let item = item_for_monitor(m.id).unwrap();
         let huge = Rect::new(0, 0, m.bounds.width + 5000, m.bounds.height + 5000);
@@ -276,6 +279,7 @@ mod tests {
 
     #[test]
     fn repeated_captures_release_their_gpu_resources() {
+        crate::require_interactive_desktop!();
         // Each iteration builds a device, pool and session and drops them. A
         // leak here would show up as a steadily growing commit charge during a
         // long session of screenshots.

@@ -18,6 +18,12 @@ const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 /// Value name under the `Run` key.
 pub const VALUE_NAME: &str = "KovaScreen";
 
+/// Flag appended to the registered command line.
+///
+/// Exported so the app can test the same constant it checks at startup: if the
+/// two ever drifted, every sign-in would pop a window the user did not ask for.
+pub const MINIMIZED_FLAG: &str = "--minimized";
+
 /// Owns an open registry key.
 struct RegKey(HKEY);
 
@@ -65,7 +71,7 @@ fn enable(exe: &Path) -> Result<()> {
 
     // `--minimized` so a sign-in launch goes straight to the tray rather than
     // opening a window the user did not ask for.
-    let command = format!("\"{}\" --minimized", exe.display());
+    let command = format!("\"{}\" {MINIMIZED_FLAG}", exe.display());
     let value = HSTRING::from(command.as_str());
 
     // REG_SZ must include the terminating NUL in its byte count.

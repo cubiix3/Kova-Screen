@@ -197,6 +197,47 @@ impl UploadProvider for VgyProvider {
     }
 }
 
+/// Follows a provider deletion link to remove an uploaded file.
+///
+/// The link is a bare capability: anyone holding it can delete the upload. It
+/// is therefore passed in from local storage, used once, and never logged --
+/// not even on failure, where the natural instinct would be to include the URL
+/// in the error message.
+///
+/// Only `https://vgy.me/` links are accepted, so a corrupted or tampered
+/// history row cannot turn this into a request to an arbitrary host.
+pub fn visit_delete_url(url: &str) -> Result<()> {
+    const PREFIX: &str = "https://vgy.me/";
+    if !url.starts_with(PREFIX) {
+        return Err(Error::Upload(
+            "that deletion link does not point at vgy.me and was not followed".into(),
+        ));
+    }
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_global(Some(Duration::from_secs(30)))
+        .max_redirects(MAX_REDIRECTS)
+        .user_agent(concat!("KovaScreen/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .into();
+
+    match agent.get(url).call() {
+        Ok(response) => {
+            let status = response.status().as_u16();
+            if (200..400).contains(&status) {
+                Ok(())
+            } else {
+                Err(Error::Upload(format!(
+                    "vgy.me refused the deletion (http {status})"
+                )))
+            }
+        }
+        // Deliberately does not include the url, which is the secret.
+        Err(err) => Err(Error::Upload(describe_transport_error(&err))),
+    }
+}
+
 /// Turns a vgy.me response into an [`UploadResult`] or a readable error.
 fn parse_response(status: u16, text: &str) -> Result<UploadResult> {
     // A non-JSON body (an HTML error page, a proxy notice) must not surface as
@@ -609,6 +650,35 @@ mod tests {
         assert!(matches!(err, Error::Upload(_)));
         let text = err.to_string();
         assert!(!text.is_empty());
+    }
+
+    #[test]
+    fn a_deletion_link_pointing_elsewhere_is_refused() {
+        // A tampered history row must not become a request to another host.
+        for url in [
+            "http://vgy.me/delete/x",
+            "https://evil.example/delete/x",
+            "https://vgy.me.evil.example/delete/x",
+            "file:///C:/Windows/System32",
+            "",
+        ] {
+            assert!(
+                visit_delete_url(url).is_err(),
+                "`{url}` should not have been followed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_deletion_failure_never_quotes_the_link() {
+        // The link is a capability; an error message that carried it would
+        // leak it into logs and crash reports.
+        let secret = "https://evil.example/delete/SUPERSECRETTOKEN";
+        let err = visit_delete_url(secret).unwrap_err().to_string();
+        assert!(
+            !err.contains("SUPERSECRETTOKEN"),
+            "the deletion link leaked: {err}"
+        );
     }
 
     #[test]

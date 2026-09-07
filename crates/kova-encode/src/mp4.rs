@@ -373,6 +373,18 @@ impl Mp4Recorder {
     }
 }
 
+// SAFETY: `IMFSinkWriter` is a Media Foundation object created in the process
+// multi-threaded apartment, where the documented contract is that calls may be
+// made from any thread provided they are not concurrent. A recorder is created
+// on the thread that starts the recording and then used from the capture
+// thread, and every call is serialised behind the mutex the recorder is stored
+// in, so no two calls can overlap. The `MediaFoundation` guard it owns is a
+// refcount on process-wide platform state and is likewise thread-agnostic.
+//
+// This is a `Send` assertion only: the type is deliberately not `Sync`, so it
+// cannot be shared by reference across threads without that mutex.
+unsafe impl Send for Mp4Recorder {}
+
 impl std::fmt::Debug for Mp4Recorder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Mp4Recorder")
