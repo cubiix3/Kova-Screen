@@ -1,5 +1,9 @@
 # Kova Screen
 
+[![CI](https://github.com/cubiix3/Kova-Screen/actions/workflows/ci.yml/badge.svg)](https://github.com/cubiix3/Kova-Screen/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/cubiix3/Kova-Screen?color=86d5f4)](https://github.com/cubiix3/Kova-Screen/releases/latest)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-86d5f4)](#license)
+
 Fast, minimal screen capture for Windows. Screenshots, GIF and MP4 recording,
 clipboard integration and optional upload — without the feature sprawl.
 
