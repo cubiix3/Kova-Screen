@@ -45,3 +45,23 @@ one, that is a valid report even without a full exploit.
 Dependabot alerts and security updates are enabled. Dependencies are kept few
 and deliberately boring; the notable ones are `tauri`, `windows`, `image`,
 `rusqlite`, `ureq` and `rustls`.
+
+### Linux-only transitive dependencies
+
+`Cargo.lock` resolves dependencies for every platform Tauri supports, not just
+the one we ship. Tauri's tray implementation pulls in the GTK stack — `gtk`,
+`atk`, `glib`, `libappindicator` — for Linux. Those crates are behind a target
+gate and are **never compiled into the Windows binary**:
+
+```bash
+# Lists the crate and its dependents on Linux
+cargo tree -i glib --target all
+
+# Prints "nothing to print" for the target we actually ship
+cargo tree -i glib --target x86_64-pc-windows-msvc
+```
+
+Advisories against those crates will still be reported by Dependabot, because
+it reads the lockfile rather than the build graph. They do not affect a Kova
+Screen release. If you are triaging one, check it against the Windows target
+before treating it as exploitable here.
