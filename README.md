@@ -208,5 +208,9 @@ For security reports, see [SECURITY.md](SECURITY.md).
 Licensed under either of [Apache License 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option, matching the rest of the Kova family.
 
+Dependency licenses are summarised in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+All of them are permissive or weak file-level copyleft; there is no GPL, LGPL-only
+or AGPL dependency.
+
 Flameshot and ShareX were a functional inspiration; no code from either is used
 here.
