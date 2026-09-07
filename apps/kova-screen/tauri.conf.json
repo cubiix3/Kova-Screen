@@ -36,6 +36,8 @@
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ],
+    "publisher": "Kova Contributors",
+    "homepage": "https://github.com/cubiix3/Kova-Screen",
     "copyright": "Copyright (c) 2026 Kova Contributors",
     "category": "Utility",
     "shortDescription": "Fast screenshots, GIFs and MP4 recording for Windows.",
