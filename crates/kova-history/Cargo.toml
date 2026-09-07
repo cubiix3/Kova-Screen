@@ -18,7 +18,7 @@ parking_lot.workspace = true
 
 # Bundled so the app never depends on a system sqlite3.dll, which would be both
 # a deployment risk and a dll-hijacking surface for a portable build.
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [dev-dependencies]
 serde_json.workspace = true
