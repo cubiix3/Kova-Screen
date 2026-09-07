@@ -1,0 +1,132 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build, e.g. v0.1.0
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install the pinned toolchain
+        run: rustup component add rustfmt clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - name: Verify the tag matches the crate version
+        # A tag that disagrees with Cargo.toml would publish an installer whose
+        # About screen shows a different version than the release it came from.
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}" -replace '^v',''
+          $manifest = Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1
+          $version = $manifest.Matches[0].Groups[1].Value
+          if ($tag -ne $version) {
+            throw "tag v$tag does not match the workspace version $version"
+          }
+          Write-Host "building version $version"
+
+      - run: npm ci
+        working-directory: ui
+
+      - name: Check
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build the installer
+        run: npx --yes @tauri-apps/cli@2 build --config apps/kova-screen/tauri.conf.json
+
+      - name: Assemble the release artifacts
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.inputs.tag || github.ref_name }}" -replace '^v',''
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+
+          # Installer.
+          Get-ChildItem target/release/bundle/nsis/*.exe |
+            ForEach-Object { Copy-Item $_.FullName "artifacts/Kova-Screen_${version}_x64-setup.exe" }
+
+          # Portable build: the executable on its own runs from any folder and
+          # keeps its settings in %APPDATA%, so a zip of it is a complete
+          # portable distribution.
+          New-Item -ItemType Directory -Force portable | Out-Null
+          Copy-Item target/release/kova-screen.exe portable/
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE portable/
+          Compress-Archive -Path portable/* -DestinationPath "artifacts/Kova-Screen_${version}_x64-portable.zip" -Force
+
+          # Checksums, in the format `sha256sum -c` accepts.
+          Push-Location artifacts
+          Get-FileHash -Algorithm SHA256 * |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+          Pop-Location
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kova-screen-${{ github.event.inputs.tag || github.ref_name }}
+          path: artifacts/*
+          if-no-files-found: error
+
+      - name: Publish the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: Kova Screen ${{ github.event.inputs.tag || github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
+          generate_release_notes: true
+          files: artifacts/*
+          body: |
+            ## Install
+
+            Download the `x64-setup.exe` below and run it. It installs per user,
+            so no administrator rights are needed, and uninstalls cleanly
+            through Settings › Apps.
+
+            A portable ZIP is available if you would rather not install
+            anything. It keeps its settings in `%APPDATA%\Kova Screen`.
+
+            Requires Windows 10 version 1903 or newer. The WebView2 runtime is
+            already present on Windows 11 and current Windows 10; the installer
+            fetches it if it is missing.
+
+            ## Verify your download
+
+            ```powershell
+            Get-FileHash .\Kova-Screen_*.exe -Algorithm SHA256
+            ```
+
+            Compare the result with `SHA256SUMS.txt`.
+
+            See the [changelog](https://github.com/cubiix3/Kova-Screen/blob/main/CHANGELOG.md)
+            for what is in this release.
