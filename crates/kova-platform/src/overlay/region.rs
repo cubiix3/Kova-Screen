@@ -142,10 +142,8 @@ fn show_overlay() -> Result<Option<(Rect, Bitmap, Point)>> {
     // SAFETY: `hwnd` is live.
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
-        // Without foreground focus the Escape key would go to whatever was
-        // focused before, and the overlay could not be cancelled.
-        let _ = SetForegroundWindow(hwnd);
     }
+    take_foreground(hwnd);
 
     run_message_loop();
 
@@ -165,6 +163,52 @@ fn show_overlay() -> Result<Option<(Rect, Bitmap, Point)>> {
             Point::new(desktop_rect.x, desktop_rect.y),
         ))),
         None => Ok(None),
+    }
+}
+
+/// Brings the overlay to the foreground and gives it keyboard focus.
+///
+/// Focus matters more than it looks: without it, Escape goes to whatever was
+/// focused before and the overlay cannot be cancelled with the keyboard.
+///
+/// `SetForegroundWindow` is refused when Windows decides the calling process
+/// has no right to steal focus. We usually do have that right, because the user
+/// just pressed our hotkey, but the rules are subtle and the call is made from
+/// a worker thread rather than the one that received the input. When it is
+/// refused, the documented workaround is to attach our input queue to the
+/// current foreground thread, which makes Windows treat the two as one thread
+/// for focus purposes, and try again.
+fn take_foreground(hwnd: HWND) {
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{SetActiveWindow, SetFocus};
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+
+    // SAFETY: `hwnd` is live for the whole function.
+    unsafe {
+        if SetForegroundWindow(hwnd).as_bool() {
+            let _ = SetFocus(Some(hwnd));
+            return;
+        }
+
+        let foreground = GetForegroundWindow();
+        if foreground.is_invalid() {
+            return;
+        }
+
+        let other = GetWindowThreadProcessId(foreground, None);
+        let ours = GetCurrentThreadId();
+        if other == 0 || other == ours {
+            return;
+        }
+
+        // Attach, retry, detach. Leaving the queues attached would tie our
+        // input state to another application for the rest of the session.
+        if AttachThreadInput(ours, other, true).as_bool() {
+            let _ = SetForegroundWindow(hwnd);
+            let _ = SetActiveWindow(hwnd);
+            let _ = SetFocus(Some(hwnd));
+            let _ = AttachThreadInput(ours, other, false);
+        }
     }
 }
 
