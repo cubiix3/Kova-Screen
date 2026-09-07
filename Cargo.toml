@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/kova-screen-core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+authors = ["Kova Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cubiix3/Kova-Screen"
+
+[workspace.dependencies]
+kova-screen-core = { path = "crates/kova-screen-core" }
+kova-capture = { path = "crates/kova-capture" }
+kova-encode = { path = "crates/kova-encode" }
+kova-platform = { path = "crates/kova-platform" }
+kova-upload = { path = "crates/kova-upload" }
+kova-history = { path = "crates/kova-history" }
+
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
+parking_lot = "0.12"
+
+windows-core = "0.62"
+windows = "0.62"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+[profile.dev]
+opt-level = 1
