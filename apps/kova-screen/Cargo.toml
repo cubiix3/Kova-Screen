@@ -51,5 +51,10 @@ tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"
 windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading"] }
 
+[dev-dependencies]
+# The end-to-end tests decode the files the pipeline wrote, to prove they are
+# real images rather than merely non-empty.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

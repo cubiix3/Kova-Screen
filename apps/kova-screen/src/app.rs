@@ -70,6 +70,23 @@ impl AppState {
         })
     }
 
+    /// Builds a state from explicit settings, with history in memory.
+    ///
+    /// Exists so integration tests can drive the real pipeline against a
+    /// temporary capture folder instead of the user's Pictures directory.
+    #[doc(hidden)]
+    pub fn for_test(settings: Settings) -> Arc<Self> {
+        let provider: Arc<dyn UploadProvider> = Arc::new(DisabledProvider);
+        Arc::new(Self {
+            settings: RwLock::new(settings),
+            history: History::in_memory().ok().map(Arc::new),
+            history_error: None,
+            provider,
+            recorder: Mutex::new(None),
+            hotkey_failures: RwLock::new(Vec::new()),
+        })
+    }
+
     /// A snapshot of the current settings.
     ///
     /// Returns a clone rather than a guard so a long capture never holds the

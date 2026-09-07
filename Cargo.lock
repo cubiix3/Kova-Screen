@@ -2097,6 +2097,7 @@ name = "kova-screen"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "image",
  "kova-capture",
  "kova-encode",
  "kova-history",

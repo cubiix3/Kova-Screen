@@ -25,6 +25,8 @@
 pub mod actions;
 pub mod app;
 pub mod commands;
+#[cfg(test)]
+mod e2e;
 pub mod hotkeys;
 pub mod notify;
 pub mod pipeline;

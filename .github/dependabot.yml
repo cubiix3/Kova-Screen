@@ -1,0 +1,29 @@
+version: 2
+updates:
+  # Rust
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # A single PR per week for routine bumps; anything that needs attention
+      # will fail CI on its own rather than being lost among nine other PRs.
+      cargo-minor:
+        update-types: [minor, patch]
+
+  # Frontend
+  - package-ecosystem: npm
+    directory: /ui
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      npm-minor:
+        update-types: [minor, patch]
+
+  # The workflows themselves
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
