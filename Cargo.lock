@@ -149,6 +149,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kova-platform"
+version = "0.1.0"
+dependencies = [
+ "kova-capture",
+ "kova-screen-core",
+ "parking_lot",
+ "serde",
+ "thiserror",
+ "tracing",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "kova-screen-core"
 version = "0.1.0"
 dependencies = [

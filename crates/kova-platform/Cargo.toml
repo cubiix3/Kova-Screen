@@ -1,0 +1,43 @@
+[package]
+name = "kova-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Windows integration for Kova Screen: clipboard, hotkeys, credentials, autostart and native overlays."
+
+[dependencies]
+kova-screen-core.workspace = true
+kova-capture.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+parking_lot.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-core.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_Security",
+    "Win32_Security_Credentials",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_ColorSystem",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

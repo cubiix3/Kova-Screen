@@ -283,15 +283,15 @@ fn resize(src: &Bitmap, dst_w: u32, dst_h: u32) -> Result<Bitmap> {
                 let row = sy * stride;
                 for sx in x0..x1 {
                     let i = row + sx * 4;
-                    for c in 0..4 {
-                        acc[c] += data[i + c] as u32;
+                    for (c, slot) in acc.iter_mut().enumerate() {
+                        *slot += data[i + c] as u32;
                     }
                     n += 1;
                 }
             }
             let n = n.max(1);
-            for c in 0..4 {
-                out.push((acc[c] / n) as u8);
+            for channel in acc {
+                out.push((channel / n) as u8);
             }
         }
     }
