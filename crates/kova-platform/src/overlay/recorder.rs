@@ -78,13 +78,18 @@ const _: () = {
     assert!(PAUSE_X > 34, "no room for the timer left of the buttons");
 };
 
+/// Colours, taken from the shared Kova palette.
+///
+/// GDI wants `0x00BBGGRR`, the reverse of the `#RRGGBB` used elsewhere.
 mod theme {
-    /// Surface, as GDI `0x00BBGGRR`.
-    pub const SURFACE: u32 = 0x0016_1310;
-    pub const TEXT: u32 = 0x00F0_EDEA;
-    pub const MUTED: u32 = 0x00A0_9A94;
-    /// Recording dot: a red that reads clearly on the dark surface.
-    pub const REC_DOT: u32 = 0x0045_45E5;
+    /// Surface: `#1b1e22`.
+    pub const SURFACE: u32 = 0x0022_1E1B;
+    /// Primary text: `#f0f2f5`.
+    pub const TEXT: u32 = 0x00F5_F2F0;
+    /// Secondary text: `#8d98a5`.
+    pub const MUTED: u32 = 0x00A5_988D;
+    /// Recording dot: the Kova danger tone `#f49b9b`.
+    pub const REC_DOT: u32 = 0x009B_9BF4;
 }
 
 /// State shared between the caller and the overlay window thread.

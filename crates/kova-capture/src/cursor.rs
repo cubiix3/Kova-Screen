@@ -298,6 +298,7 @@ mod tests {
 
     #[test]
     fn cursor_position_is_inside_the_virtual_desktop() {
+        crate::require_interactive_desktop!();
         let p = position().expect("a cursor position");
         let desktop = crate::monitor::virtual_desktop_bounds().unwrap();
         // The pointer can sit exactly on the far edge, hence the inclusive bound.
@@ -307,6 +308,7 @@ mod tests {
 
     #[test]
     fn drawing_the_live_cursor_never_corrupts_the_bitmap() {
+        crate::require_interactive_desktop!();
         let mut bmp = canvas(200, 200);
         // Best effort: on a headless agent the cursor may be hidden, which is a
         // successful no-op. Either way the buffer must stay the right size.

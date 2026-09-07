@@ -1,0 +1,55 @@
+[package]
+name = "kova-screen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fast, minimal screenshot and screen recording for Windows."
+default-run = "kova-screen"
+
+[lib]
+# Tauri convention: the app lives in a library so integration tests and the
+# mobile entry points can reach it. `_lib` avoids colliding with the binary.
+name = "kova_screen_lib"
+crate-type = ["lib"]
+
+[[bin]]
+name = "kova-screen"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+kova-screen-core.workspace = true
+kova-capture.workspace = true
+kova-encode.workspace = true
+kova-platform.workspace = true
+kova-upload.workspace = true
+kova-history.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+parking_lot.workspace = true
+time.workspace = true
+# Only for constructing the error type tauri exposes in its public API.
+anyhow = "1"
+
+# protocol-asset lets the history window render thumbnails straight from the
+# capture folder, with the scope restricted at runtime to that folder alone.
+tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+
+[target.'cfg(windows)'.dependencies]
+tauri-plugin-single-instance = "2"
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

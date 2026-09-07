@@ -30,6 +30,10 @@ pub mod dpi;
 pub mod gdi;
 pub mod monitor;
 pub mod session;
+// Not `cfg(test)`: downstream crates' tests need the same probe, and a
+// cfg(test) module is not visible across a crate boundary.
+#[doc(hidden)]
+pub mod testenv;
 pub mod wgc;
 pub mod window;
 

@@ -25,7 +25,7 @@
 //! A single window spans the whole virtual desktop rather than one per monitor,
 //! which makes a drag that crosses a monitor boundary work with no extra code.
 
-use kova_screen_core::{Bitmap, Error, Point, Rect, Result};
+use kova_screen_core::{Bitmap, Error, PixelFormat, Point, Rect, Result};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_OVER, AlphaBlend, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, BeginPaint,
@@ -59,16 +59,19 @@ pub struct Selection {
     pub bitmap: Bitmap,
 }
 
-/// Colours, matching the Kova palette.
+/// Colours, taken from the shared Kova palette.
+///
+/// GDI wants `0x00BBGGRR`, which is the reverse of the `#RRGGBB` the rest of
+/// the family writes, so each constant notes the hex it corresponds to.
 mod theme {
-    /// Selection border: Kova accent blue, as a GDI `0x00BBGGRR` value.
-    pub const BORDER: u32 = 0x00F5_9E4B;
+    /// Selection border: Kova accent `#86d5f4`.
+    pub const BORDER: u32 = 0x00F4_D586;
+    /// Readout surface: `#1b1e22`.
+    pub const READOUT_BG: u32 = 0x0022_1E1B;
+    /// Readout text: `#f0f2f5`.
+    pub const READOUT_FG: u32 = 0x00F5_F2F0;
     /// Dim strength over the unselected area, 0-255.
     pub const DIM_ALPHA: u8 = 115;
-    /// Readout background.
-    pub const READOUT_BG: u32 = 0x0016_1310;
-    /// Readout text.
-    pub const READOUT_FG: u32 = 0x00F0_EDEA;
 }
 
 /// Height of the size readout pill, in pixels at 100% scaling.
@@ -85,6 +88,25 @@ const READOUT_W: i32 = 116;
 /// spawn a thread for it rather than blocking the UI thread, which would freeze
 /// the tray while the overlay is up.
 pub fn select() -> Result<Option<Selection>> {
+    let Some((rect, desktop, origin)) = show_overlay()? else {
+        return Ok(None);
+    };
+    let bitmap = desktop.crop(rect.to_local(origin))?;
+    Ok(Some(Selection { rect, bitmap }))
+}
+
+/// Shows the overlay and returns only the chosen rectangle.
+///
+/// Used to pick a recording area, where the frozen still is not wanted: a
+/// recording captures live frames afterwards, so cropping the frozen desktop
+/// would only cost a pointless copy of a potentially very large bitmap.
+pub fn select_rect() -> Result<Option<Rect>> {
+    Ok(show_overlay()?.map(|(rect, _, _)| rect))
+}
+
+/// Runs the overlay, returning the selection, the frozen desktop it was drawn
+/// from, and that bitmap origin on the virtual desktop.
+fn show_overlay() -> Result<Option<(Rect, Bitmap, Point)>> {
     let desktop_rect = kova_capture::monitor::virtual_desktop_bounds()?;
     // Capture first, then show the window, so the overlay itself can never
     // appear in the frozen frame.
@@ -134,11 +156,14 @@ pub fn select() -> Result<Option<Selection>> {
     }
 
     match state.result.take() {
-        Some(rect) => {
-            let local = rect.to_local(Point::new(desktop_rect.x, desktop_rect.y));
-            let bitmap = state.desktop.crop(local)?;
-            Ok(Some(Selection { rect, bitmap }))
-        }
+        Some(rect) => Ok(Some((
+            rect,
+            std::mem::replace(
+                &mut state.desktop,
+                Bitmap::new_zeroed(1, 1, PixelFormat::Bgra8)?,
+            ),
+            Point::new(desktop_rect.x, desktop_rect.y),
+        ))),
         None => Ok(None),
     }
 }

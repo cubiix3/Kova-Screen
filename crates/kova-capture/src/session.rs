@@ -381,6 +381,7 @@ mod tests {
 
     #[test]
     fn delivers_frames_at_roughly_the_requested_rate() {
+        crate::require_interactive_desktop!();
         let count = Arc::new(AtomicU32::new(0));
         let timestamps = Arc::new(Mutex::new(Vec::new()));
         let sink = CountingSink {
@@ -418,6 +419,7 @@ mod tests {
 
     #[test]
     fn timestamps_increase_monotonically_from_zero() {
+        crate::require_interactive_desktop!();
         let timestamps = Arc::new(Mutex::new(Vec::new()));
         let sink = CountingSink {
             count: Arc::new(AtomicU32::new(0)),
@@ -450,6 +452,7 @@ mod tests {
 
     #[test]
     fn a_sink_error_stops_the_session_and_is_reported() {
+        crate::require_interactive_desktop!();
         let sink = CountingSink {
             count: Arc::new(AtomicU32::new(0)),
             fail_after: Some(3),
@@ -473,6 +476,7 @@ mod tests {
 
     #[test]
     fn max_duration_stops_the_session_on_its_own() {
+        crate::require_interactive_desktop!();
         let count = Arc::new(AtomicU32::new(0));
         let sink = CountingSink {
             count: Arc::clone(&count),
@@ -502,6 +506,7 @@ mod tests {
 
     #[test]
     fn stopping_twice_is_safe() {
+        crate::require_interactive_desktop!();
         let sink = CountingSink {
             count: Arc::new(AtomicU32::new(0)),
             fail_after: None,
@@ -524,6 +529,7 @@ mod tests {
 
     #[test]
     fn dropping_a_session_stops_the_capture_thread() {
+        crate::require_interactive_desktop!();
         let count = Arc::new(AtomicU32::new(0));
         let sink = CountingSink {
             count: Arc::clone(&count),
