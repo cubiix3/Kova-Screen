@@ -6,6 +6,7 @@ members = [
     "crates/kova-encode",
     "crates/kova-platform",
     "crates/kova-upload",
+    "crates/kova-history",
 ]
 
 [workspace.package]
