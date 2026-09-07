@@ -18,6 +18,12 @@
 //! [`RecorderOverlay::is_excluded_from_capture`] reports so the UI can say so
 //! rather than silently producing a recording with a control bar burned in.
 //!
+//! # Shape
+//!
+//! The corners are rounded: through the Windows 11 compositor preference where
+//! it exists, which anti-aliases them properly, and by clipping the window to a
+//! rounded region on Windows 10, which is harder-edged but the right shape.
+//!
 //! # Cost
 //!
 //! The window repaints once a second, only while recording, and only the
@@ -32,7 +38,7 @@ use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW,
     EndPaint, FillRect, HBRUSH, HDC, HGDIOBJ, InvalidateRect, PAINTSTRUCT, SelectObject, SetBkMode,
-    SetTextColor, TRANSPARENT,
+    SetTextColor, SetWindowRgn, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
@@ -265,6 +271,8 @@ impl OverlayWindow {
             );
         }
 
+        round_corners(hwnd);
+
         // SAFETY: `hwnd` is live. SHOWNOACTIVATE preserves the user focus.
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -296,6 +304,64 @@ impl OverlayWindow {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_ID);
             let _ = DestroyWindow(self.hwnd);
+        }
+    }
+}
+
+/// Corner radius used on Windows 10, in pixels.
+///
+/// Chosen to read the same as the Windows 11 small-corner preference, so the
+/// overlay looks identical across both.
+const CORNER_RADIUS: i32 = 8;
+
+/// Rounds the overlay corners.
+///
+/// Windows 11 has a compositor-level preference, which is preferred because DWM
+/// then anti-aliases the corners properly. Windows 10 has no such attribute, so
+/// the window is clipped to a rounded region instead -- visibly harder-edged,
+/// but the right shape.
+///
+/// Purely cosmetic on every path, so a failure is logged at debug and ignored.
+fn round_corners(hwnd: HWND) {
+    use windows::Win32::Graphics::Dwm::{
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUNDSMALL, DwmSetWindowAttribute,
+    };
+
+    let preference = DWMWCP_ROUNDSMALL;
+    // SAFETY: the attribute and its size match; older builds return an error
+    // HRESULT rather than misbehaving.
+    let rounded = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            std::ptr::from_ref(&preference).cast(),
+            size_of_val(&preference) as u32,
+        )
+    };
+    if rounded.is_ok() {
+        return;
+    }
+
+    // Windows 10: clip the window to a rounded rectangle.
+    // SAFETY: the region is handed to the window, which owns it from here on,
+    // so it must not be deleted by us.
+    unsafe {
+        let region = windows::Win32::Graphics::Gdi::CreateRoundRectRgn(
+            0,
+            0,
+            WIDTH + 1,
+            HEIGHT + 1,
+            CORNER_RADIUS,
+            CORNER_RADIUS,
+        );
+        if region.is_invalid() {
+            tracing::debug!("could not round the overlay corners");
+            return;
+        }
+        if SetWindowRgn(hwnd, Some(region), true) == 0 {
+            // The window did not take ownership, so the region is still ours.
+            let _ = DeleteObject(HGDIOBJ(region.0));
+            tracing::debug!("could not apply the overlay corner region");
         }
     }
 }
@@ -596,6 +662,48 @@ mod tests {
         state.set_elapsed(Duration::from_secs(3));
         std::thread::sleep(Duration::from_millis(120));
         overlay.close();
+    }
+
+    #[test]
+    fn rounding_the_corners_leaves_the_window_intact() {
+        use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, GetWindowRgn, HGDIOBJ};
+        use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+
+        // Runs against the real overlay window, on whichever path this build
+        // takes: the Windows 11 compositor preference, or the Windows 10
+        // region fallback. Both must leave a usable window behind, and the
+        // fallback must not leak the region it creates.
+        let mut overlay = RecorderOverlay::show().expect("the recorder overlay opens");
+        std::thread::sleep(Duration::from_millis(120));
+
+        // Rounding an already-rounded window must also be harmless, since a
+        // future change could plausibly call it again on a resize.
+        let hwnd = find_overlay_window();
+        if let Some(hwnd) = hwnd {
+            round_corners(hwnd);
+            round_corners(hwnd);
+
+            // SAFETY: a scratch region that receives the window one, freed below.
+            unsafe {
+                let scratch = CreateRectRgn(0, 0, 1, 1);
+                let _ = GetWindowRgn(hwnd, scratch);
+                let _ = DeleteObject(HGDIOBJ(scratch.0));
+                assert!(
+                    IsWindow(Some(hwnd)).as_bool(),
+                    "rounding the corners destroyed the window"
+                );
+            }
+        }
+        overlay.close();
+    }
+
+    /// Finds the live overlay window by its class name.
+    fn find_overlay_window() -> Option<HWND> {
+        use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+        let class = win32::class_name("KovaScreenRecorderOverlay");
+        // SAFETY: `class` is a NUL-terminated wide string alive for the call.
+        let hwnd = unsafe { FindWindowW(win32::class_ptr(&class), PCWSTR::null()) }.ok()?;
+        (!hwnd.is_invalid()).then_some(hwnd)
     }
 
     #[test]
