@@ -1,0 +1,27 @@
+[package]
+name = "kova-history"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Local capture history for Kova Screen."
+
+[dependencies]
+kova-screen-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+time.workspace = true
+parking_lot.workspace = true
+
+# Bundled so the app never depends on a system sqlite3.dll, which would be both
+# a deployment risk and a dll-hijacking surface for a portable build.
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
