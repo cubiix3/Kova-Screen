@@ -1,0 +1,26 @@
+[package]
+name = "kova-upload"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pluggable upload providers for Kova Screen, starting with vgy.me."
+
+[dependencies]
+kova-screen-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# A small blocking HTTP client. rustls rather than the platform TLS stack so
+# the certificate behaviour is identical on every Windows version we support.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+tiny_http = "0.12"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
