@@ -1,0 +1,32 @@
+[package]
+name = "kova-encode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Image, GIF and MP4 encoding for Kova Screen."
+
+[dependencies]
+kova-screen-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# Still-image codecs. Default features are off so we pull in exactly the three
+# formats the product offers and none of the long tail.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+gif = "0.13"
+color_quant = "1.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-core.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Variant",
+] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

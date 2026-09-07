@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/kova-screen-core",
     "crates/kova-capture",
+    "crates/kova-encode",
 ]
 
 [workspace.package]
