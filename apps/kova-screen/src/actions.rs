@@ -63,6 +63,31 @@ pub fn dispatch(state: Arc<AppState>, action: Action) {
 }
 
 fn run(state: &Arc<AppState>, action: Action) {
+    // Ignore repeated capture hotkeys while a picker/startup is already active.
+    // Stop remains available even while another action is finishing.
+    static ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    struct ActiveGuard;
+    impl Drop for ActiveGuard {
+        fn drop(&mut self) {
+            ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let _active = if matches!(action, Action::StopRecording) {
+        None
+    } else {
+        if ACTIVE
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::Acquire,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return;
+        }
+        Some(ActiveGuard)
+    };
     // A hotkey pressed during a recording should stop it rather than start a
     // second one, which would fight over the encoder and the overlay.
     if state.is_recording() && !matches!(action, Action::StopRecording) {

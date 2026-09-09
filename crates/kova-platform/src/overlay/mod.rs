@@ -5,8 +5,10 @@
 //! the recorder overlay because a WebView cannot be reliably excluded from the
 //! capture it is controlling.
 
+mod boundary;
 pub mod recorder;
 pub mod region;
+pub mod status;
 
 pub use recorder::{RecorderCommand, RecorderOverlay, RecorderState};
 pub use region::Selection;

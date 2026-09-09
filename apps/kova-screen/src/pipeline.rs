@@ -97,17 +97,19 @@ impl CaptureOutcome {
 /// Returns `Err` only when there is genuinely nothing to give the user.
 pub fn take_screenshot(state: &Arc<AppState>, request: ShotRequest) -> Result<CaptureOutcome> {
     let settings = state.settings();
+    apply_delay(&settings);
 
     // The region overlay returns the pixels it froze, so there is no second
     // capture and no chance of a mismatch with what the user selected.
     let bitmap = match request {
-        ShotRequest::Region => match kova_platform::overlay::region::select()? {
+        ShotRequest::Region => match kova_platform::overlay::region::select_with_cursor(
+            settings.capture.include_cursor,
+        )? {
             Some(selection) => selection.bitmap,
             None => return Ok(CaptureOutcome::cancelled()),
         },
         other => {
             let target = resolve_target(other)?;
-            apply_delay(&settings);
             kova_capture::capture(
                 target,
                 CaptureOptions {

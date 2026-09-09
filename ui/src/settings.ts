@@ -239,14 +239,14 @@ function body(root: HTMLElement): HTMLElement[] {
         ),
         field(
           "Hardware encoding",
-          "Use the GPU H.264 encoder when one is available.",
+          "Experimental. Some GPU drivers retain resources between recordings. Leave off for stable long sessions.",
           toggle(s.recording.hardware_encoding, (v) =>
             void commit(root, (n) => { n.recording.hardware_encoding = v; }),
           ),
         ),
         field(
           "Maximum length",
-          "Seconds before a recording stops itself. 0 disables the limit.",
+          "Recorded seconds before stopping automatically; pauses do not count. 0 disables the limit.",
           numberInput(s.recording.max_duration_secs, 0, 21600, (v) =>
             void commit(root, (n) => { n.recording.max_duration_secs = v; }),
           ),
@@ -493,6 +493,8 @@ function hotkeyInput(
     onKeydown: (event: Event) => {
       const e = event as KeyboardEvent;
       e.preventDefault();
+      // Holding a key must not send overlapping save/re-registration requests.
+      if (e.repeat) return;
 
       if (e.key === "Escape") {
         void commit(root, (n) => { n.hotkeys[key] = ""; });
@@ -517,7 +519,6 @@ function hotkeyInput(
 /** Maps a `KeyboardEvent` onto the spelling the Rust parser accepts. */
 function normaliseKey(event: KeyboardEvent): string {
   const key = event.key;
-  if (key.length === 1) return key.toUpperCase();
 
   const named: Record<string, string> = {
     PrintScreen: "PrintScreen",
@@ -537,7 +538,7 @@ function normaliseKey(event: KeyboardEvent): string {
     ArrowRight: "Right",
     Pause: "Pause",
   };
-  return named[key] ?? key;
+  return named[key] ?? (key.length === 1 ? key.toUpperCase() : key);
 }
 
 async function chooseFolder(root: HTMLElement): Promise<void> {

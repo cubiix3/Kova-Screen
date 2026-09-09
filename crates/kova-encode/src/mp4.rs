@@ -54,19 +54,49 @@ pub struct Mp4Summary {
     pub duration: Duration,
 }
 
-/// Initialises Media Foundation for the calling process and shuts it down on drop.
-///
-/// `MFStartup` and `MFShutdown` are refcounted, so nesting is safe; tying them
-/// to a guard means a failed recording cannot leave the platform initialised.
-struct MediaFoundation;
+/// Shared process runtime. Codecs and files remain per-recording; the platform
+/// and implicit MTA are shut down once their final application reference drops.
+struct MediaFoundation(usize);
+
+// Reuse the process-wide platform across recordings. Repeated MFStartup /
+// MFShutdown cycles retained native worker handles on the tested Windows build.
+static RUNTIME: std::sync::Mutex<Option<std::sync::Arc<MediaFoundation>>> =
+    std::sync::Mutex::new(None);
+
+/// Called after recordings have been finalised at application exit. Outstanding
+/// recorders retain their own reference, so MF cannot shut down underneath one.
+pub fn shutdown_runtime() {
+    let runtime = RUNTIME.lock().unwrap_or_else(|e| e.into_inner()).take();
+    drop(runtime);
+}
 
 impl MediaFoundation {
-    fn startup() -> Result<Self> {
+    fn startup() -> Result<std::sync::Arc<Self>> {
+        let mut cached = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(runtime) = cached.as_ref() {
+            return Ok(std::sync::Arc::clone(runtime));
+        }
+        let runtime = std::sync::Arc::new(Self::initialise()?);
+        *cached = Some(std::sync::Arc::clone(&runtime));
+        Ok(runtime)
+    }
+
+    fn initialise() -> Result<Self> {
+        // Keep the process MTA alive while the writer crosses worker threads.
+        // Unlike CoInitializeEx, this cookie may be released on another thread.
+        let cookie = unsafe { windows::Win32::System::Com::CoIncrementMTAUsage() }
+            .map_err(|e| Error::Encode(format!("could not initialise encoder COM: {e}")))?;
         // SAFETY: standard platform initialisation; NOSOCKET skips the network
         // source, which a screen recorder never needs.
-        unsafe { MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET) }
-            .map_err(|e| Error::Encode(format!("media foundation is unavailable: {e}")))?;
-        Ok(Self)
+        if let Err(e) = unsafe { MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET) } {
+            unsafe {
+                let _ = windows::Win32::System::Com::CoDecrementMTAUsage(cookie);
+            }
+            return Err(Error::Encode(format!(
+                "media foundation is unavailable: {e}"
+            )));
+        }
+        Ok(Self(cookie.0 as usize))
     }
 }
 
@@ -75,6 +105,9 @@ impl Drop for MediaFoundation {
         // SAFETY: balances exactly one successful MFStartup.
         unsafe {
             let _ = MFShutdown();
+            let _ = windows::Win32::System::Com::CoDecrementMTAUsage(
+                windows::Win32::System::Com::CO_MTA_USAGE_COOKIE(self.0 as *mut _),
+            );
         }
     }
 }
@@ -89,7 +122,7 @@ pub struct Mp4Recorder {
     /// Kept so an empty recording can delete its own stub file.
     path: std::path::PathBuf,
     /// Dropped last, after the writer, so MF stays initialised while finalising.
-    _mf: MediaFoundation,
+    _mf: std::sync::Arc<MediaFoundation>,
 }
 
 impl Mp4Recorder {
@@ -357,8 +390,8 @@ impl Mp4Recorder {
         }
 
         // SAFETY: called once, after the last WriteSample.
-        unsafe { writer.Finalize() }
-            .map_err(|e| Error::Encode(format!("could not finalise the mp4: {e}")))?;
+        let finalised = unsafe { writer.Finalize() };
+        finalised.map_err(|e| Error::Encode(format!("could not finalise the mp4: {e}")))?;
         Ok(summary)
     }
 
@@ -414,7 +447,6 @@ impl Drop for Mp4Recorder {
     }
 }
 
-/// Packs two `u32` into the `u64` attribute Media Foundation expects.
 fn set_size(media_type: &IMFMediaType, key: windows_core::GUID, w: u32, h: u32) -> Result<()> {
     let packed = ((w as u64) << 32) | h as u64;
     // SAFETY: `key` is a valid attribute GUID for a media type.

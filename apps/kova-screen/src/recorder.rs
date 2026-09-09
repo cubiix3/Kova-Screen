@@ -56,7 +56,7 @@ pub struct RecorderHandle {
     encoder: Arc<parking_lot::Mutex<Option<Encoder>>>,
     path: PathBuf,
     format: RecordingFormat,
-    started: std::time::Instant,
+    clock: Arc<parking_lot::Mutex<RecordingClock>>,
     paused: Arc<AtomicBool>,
     /// Set once `stop` has consumed the encoder.
     finished: bool,
@@ -72,6 +72,42 @@ pub struct RecordingSummary {
     pub size_bytes: u64,
     /// True when a size limit cut the recording short.
     pub truncated: bool,
+}
+
+/// Shared timeline for the overlay, output timestamps and duration limit.
+struct RecordingClock {
+    started: std::time::Instant,
+    paused_at: Option<std::time::Instant>,
+    paused_for: Duration,
+}
+
+impl RecordingClock {
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            paused_at: None,
+            paused_for: Duration::ZERO,
+        }
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.elapsed_at(std::time::Instant::now())
+    }
+
+    fn elapsed_at(&self, now: std::time::Instant) -> Duration {
+        self.paused_at
+            .unwrap_or(now)
+            .saturating_duration_since(self.started)
+            .saturating_sub(self.paused_for)
+    }
+
+    fn set_paused(&mut self, paused: bool, now: std::time::Instant) {
+        if paused {
+            self.paused_at.get_or_insert(now);
+        } else if let Some(start) = self.paused_at.take() {
+            self.paused_for += now.saturating_duration_since(start);
+        }
+    }
 }
 
 impl RecorderHandle {
@@ -127,17 +163,19 @@ impl RecorderHandle {
 
         let encoder = Arc::new(parking_lot::Mutex::new(Some(encoder)));
         let paused = Arc::new(AtomicBool::new(false));
+        let clock = Arc::new(parking_lot::Mutex::new(RecordingClock::new()));
 
         let sink = RecordingSink {
             encoder: Arc::clone(&encoder),
             paused: Arc::clone(&paused),
+            clock: Arc::clone(&clock),
             budget_reached: false,
         };
 
         let max_duration = (settings.recording.max_duration_secs > 0)
             .then(|| Duration::from_secs(settings.recording.max_duration_secs as u64));
 
-        let session = CaptureSession::start(
+        let mut session = CaptureSession::start(
             SessionOptions {
                 target: session_target,
                 fps,
@@ -153,7 +191,28 @@ impl RecorderHandle {
             let _ = std::fs::remove_file(&path);
         })?;
 
-        let overlay = RecorderOverlay::show()?;
+        let visible_extent = if format == RecordingFormat::Mp4 {
+            extent.align_down(2)
+        } else {
+            extent
+        };
+        let region = match session_target {
+            SessionTarget::Monitor(id, _) => kova_capture::monitor::find(id).map(|m| {
+                Rect::new(
+                    m.bounds.x + visible_extent.x,
+                    m.bounds.y + visible_extent.y,
+                    visible_extent.width,
+                    visible_extent.height,
+                )
+            }),
+            // WGC follows a moving window; a static desktop outline would lie.
+            SessionTarget::Window(_) => None,
+        };
+        let overlay = RecorderOverlay::show_for_region(region).inspect_err(|_| {
+            let _ = session.stop();
+            drop(encoder.lock().take());
+            let _ = std::fs::remove_file(&path);
+        })?;
 
         Ok(Self {
             session,
@@ -161,7 +220,7 @@ impl RecorderHandle {
             encoder,
             path,
             format,
-            started: std::time::Instant::now(),
+            clock,
             paused,
             finished: false,
         })
@@ -181,7 +240,15 @@ impl RecorderHandle {
     }
 
     pub fn elapsed(&self) -> Duration {
-        self.started.elapsed()
+        self.clock.lock().elapsed()
+    }
+
+    fn set_paused(&self, paused: bool) {
+        self.clock
+            .lock()
+            .set_paused(paused, std::time::Instant::now());
+        self.paused.store(paused, Ordering::Relaxed);
+        self.overlay.state().set_paused(paused);
     }
 
     pub fn is_paused(&self) -> bool {
@@ -198,8 +265,7 @@ impl RecorderHandle {
 
         if state.take_pause_request() {
             let now = !self.paused.load(Ordering::Relaxed);
-            self.paused.store(now, Ordering::Relaxed);
-            state.set_paused(now);
+            self.set_paused(now);
         }
 
         state.take_stop_request() || !self.session.is_running()
@@ -219,7 +285,7 @@ impl RecorderHandle {
             .take()
             .ok_or_else(|| Error::Encode("the recording was already finalised".into()))?;
 
-        let duration = self.started.elapsed();
+        let duration = self.elapsed();
         let (frames, truncated) = match encoder {
             Encoder::Mp4(recorder) => {
                 let summary = recorder.finish()?;
@@ -348,14 +414,22 @@ enum Encoder {
 struct RecordingSink {
     encoder: Arc<parking_lot::Mutex<Option<Encoder>>>,
     paused: Arc<AtomicBool>,
+    clock: Arc<parking_lot::Mutex<RecordingClock>>,
     budget_reached: bool,
 }
 
 impl FrameSink for RecordingSink {
+    fn is_finished(&self) -> bool {
+        self.budget_reached
+    }
+    fn elapsed(&self, _wall_time: Duration) -> Duration {
+        self.clock.lock().elapsed()
+    }
+    fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
     fn on_frame(&mut self, frame: &Bitmap, timestamp: Duration) -> Result<()> {
-        // While paused, frames are discarded but the session keeps running so
-        // resuming is instant. Timestamps keep advancing, which shows the pause
-        // as a still section rather than a jump cut.
+        // A pause that begins during GPU readback must not emit another frame.
         if self.paused.load(Ordering::Relaxed) || self.budget_reached {
             return Ok(());
         }
@@ -369,8 +443,8 @@ impl FrameSink for RecordingSink {
         match encoder {
             Encoder::Mp4(recorder) => recorder.push_frame(frame, timestamp),
             Encoder::Gif(recorder) => {
-                // `false` means the size budget was reached. Stop feeding it,
-                // but let the session end normally so the file is finalised.
+                // The capture loop observes this before the next GPU readback
+                // and ends normally, allowing the watcher to finalise the GIF.
                 if !recorder.push_frame(frame, timestamp)? {
                     self.budget_reached = true;
                 }
@@ -383,6 +457,239 @@ impl FrameSink for RecordingSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_clock_excludes_repeated_and_unfinished_pauses() {
+        let mut clock = RecordingClock::new();
+        let start = clock.started;
+        clock.set_paused(true, start + Duration::from_secs(2));
+        clock.set_paused(true, start + Duration::from_secs(3));
+        assert_eq!(
+            clock.elapsed_at(start + Duration::from_secs(8)),
+            Duration::from_secs(2)
+        );
+        clock.set_paused(false, start + Duration::from_secs(8));
+        assert_eq!(
+            clock.elapsed_at(start + Duration::from_secs(10)),
+            Duration::from_secs(4)
+        );
+        clock.set_paused(true, start + Duration::from_secs(11));
+        assert_eq!(
+            clock.elapsed_at(start + Duration::from_secs(20)),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn gif_budget_ends_capture_without_a_manual_stop() {
+        kova_capture::require_interactive_desktop!();
+        let mut settings = Settings::default();
+        // Force the first written frame over budget without generating a huge GIF.
+        settings.recording.gif_max_size_mb = 0;
+        let path = temp_path("budget-stop.gif");
+        let handle = RecorderHandle::start(
+            &settings,
+            RecordingFormat::Gif,
+            RecordingTarget::Region(primary_region(160, 120)),
+            path.clone(),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while handle.is_running() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !handle.is_running(),
+            "GIF kept capturing after its size limit"
+        );
+        assert!(handle.poll_overlay());
+        let summary = handle.stop().unwrap();
+        assert!(summary.truncated);
+        assert_eq!(summary.frames, 1);
+        assert!(std::fs::read(&path).unwrap().ends_with(&[0x3b]));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// Opt-in measurement of the real capture/encoder/overlay path. No upload.
+    #[test]
+    #[ignore = "interactive CPU/RAM/handle profile; records local clips"]
+    fn profile_recording_resources() {
+        use windows::Win32::Foundation::FILETIME;
+        use windows::Win32::System::ProcessStatus::*;
+        use windows::Win32::System::Threading::*;
+
+        fn snapshot(stage: &str) -> (u32, u32, f64) {
+            unsafe {
+                let process = GetCurrentProcess();
+                let mut memory = PROCESS_MEMORY_COUNTERS_EX::default();
+                memory.cb = size_of_val(&memory) as u32;
+                GetProcessMemoryInfo(process, std::ptr::from_mut(&mut memory).cast(), memory.cb)
+                    .unwrap();
+                let mut handles = 0;
+                GetProcessHandleCount(process, &mut handles).unwrap();
+                let gdi = GetGuiResources(process, GR_GDIOBJECTS);
+                let user = GetGuiResources(process, GR_USEROBJECTS);
+                let (mut created, mut exited, mut kernel, mut user_time) = (
+                    FILETIME::default(),
+                    FILETIME::default(),
+                    FILETIME::default(),
+                    FILETIME::default(),
+                );
+                GetProcessTimes(
+                    process,
+                    &mut created,
+                    &mut exited,
+                    &mut kernel,
+                    &mut user_time,
+                )
+                .unwrap();
+                let ticks =
+                    |v: FILETIME| ((v.dwHighDateTime as u64) << 32) | v.dwLowDateTime as u64;
+                let cpu = (ticks(kernel) + ticks(user_time)) as f64 / 10_000_000.0;
+                eprintln!(
+                    "KOVA_PERF,{stage},{:.2},{:.2},{handles},{gdi},{user},{cpu:.4}",
+                    memory.WorkingSetSize as f64 / 1048576.0,
+                    memory.PrivateUsage as f64 / 1048576.0
+                );
+                (gdi, user, cpu)
+            }
+        }
+
+        assert!(
+            kova_capture::testenv::interactive_desktop(),
+            "an unlocked desktop is required"
+        );
+        eprintln!("KOVA_PERF,stage,working_set_mib,private_mib,handles,gdi,user,cpu_seconds");
+        snapshot("initial");
+        let mode = std::env::var("KOVA_PROFILE_MODE").unwrap_or_default();
+        if mode == "encode" {
+            let frame =
+                Bitmap::new_zeroed(1280, 720, kova_screen_core::PixelFormat::Bgra8).unwrap();
+            let cycles = std::env::var("KOVA_PROFILE_CYCLES")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(10);
+            for cycle in 0..cycles {
+                let path = temp_path("encoder-resource-probe.mp4");
+                let mut encoder = Mp4Recorder::create(
+                    &path,
+                    Mp4Options {
+                        width: 1280,
+                        height: 720,
+                        fps: 30,
+                        bitrate: 4_000_000,
+                        hardware: std::env::var_os("KOVA_PROFILE_SOFTWARE").is_none(),
+                    },
+                )
+                .unwrap();
+                for i in 0..30 {
+                    encoder
+                        .push_frame(&frame, Duration::from_millis(i * 33))
+                        .unwrap();
+                }
+                encoder.finish().unwrap();
+                std::fs::remove_file(path).unwrap();
+                std::thread::sleep(Duration::from_millis(500));
+                snapshot(&format!("encoder-{cycle}-stopped"));
+            }
+            let settle = std::env::var("KOVA_PROFILE_SETTLE_SECONDS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+            for step in 0..settle / 10 {
+                std::thread::sleep(Duration::from_secs(10));
+                snapshot(&format!("encoder-idle-{}s", (step + 1) * 10));
+            }
+            kova_encode::mp4::shutdown_runtime();
+            std::thread::sleep(Duration::from_secs(3));
+            snapshot("encoder-runtime-shutdown");
+            return;
+        }
+        if mode == "capture" {
+            struct Sink;
+            impl FrameSink for Sink {
+                fn on_frame(&mut self, _: &Bitmap, _: Duration) -> Result<()> {
+                    Ok(())
+                }
+            }
+            let (target, _) = RecordingTarget::Region(primary_region(1280, 720))
+                .resolve()
+                .unwrap();
+            for cycle in 0..10 {
+                let mut session = CaptureSession::start(
+                    SessionOptions {
+                        target,
+                        fps: 30,
+                        include_cursor: false,
+                        max_duration: None,
+                    },
+                    Box::new(Sink),
+                )
+                .unwrap();
+                std::thread::sleep(Duration::from_millis(500));
+                session.stop().unwrap();
+                drop(session);
+                std::thread::sleep(Duration::from_millis(500));
+                snapshot(&format!("capture-{cycle}-stopped"));
+            }
+            return;
+        }
+        if mode == "overlay" {
+            for cycle in 0..20 {
+                let mut overlay =
+                    RecorderOverlay::show_for_region(Some(primary_region(1280, 720))).unwrap();
+                std::thread::sleep(Duration::from_millis(100));
+                overlay.close();
+                drop(overlay);
+                snapshot(&format!("overlay-{cycle}-stopped"));
+            }
+            return;
+        }
+        for format in [RecordingFormat::Mp4, RecordingFormat::Gif] {
+            let mut baseline = None;
+            for cycle in 0..8 {
+                let path = temp_path(&format!("resource-probe-{cycle}.{}", format.extension()));
+                let handle = RecorderHandle::start(
+                    &Settings::default(),
+                    format,
+                    RecordingTarget::Region(primary_region(1280, 720)),
+                    path.clone(),
+                )
+                .unwrap();
+                let started = std::time::Instant::now();
+                let (_, _, cpu_before) = snapshot(&format!("{format:?}-{cycle}-start"));
+                while started.elapsed() < Duration::from_secs(2) {
+                    handle.poll_overlay();
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                let (_, _, cpu_after) = snapshot(&format!("{format:?}-{cycle}-recording"));
+                eprintln!(
+                    "KOVA_CPU,{format:?},{cycle},{:.2},one_core_percent",
+                    (cpu_after - cpu_before) / started.elapsed().as_secs_f64() * 100.0
+                );
+                let summary = handle.stop().unwrap();
+                assert!(summary.frames > 0);
+                std::fs::remove_file(path).unwrap();
+                std::thread::sleep(Duration::from_millis(500));
+                let (gdi, user, _) = snapshot(&format!("{format:?}-{cycle}-stopped"));
+                if cycle == 1 {
+                    baseline = Some((gdi, user));
+                }
+                if let Some((base_gdi, base_user)) = baseline {
+                    assert!(
+                        gdi <= base_gdi + 2,
+                        "GDI objects grow after recording teardown"
+                    );
+                    assert!(
+                        user <= base_user + 2,
+                        "USER objects grow after recording teardown"
+                    );
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_secs(3));
+        snapshot("settled");
+    }
 
     fn temp_path(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join("kova-recorder-tests");
@@ -503,8 +810,10 @@ mod tests {
     fn a_paused_recording_stops_adding_frames_and_resumes() {
         kova_capture::require_interactive_desktop!();
         let path = temp_path("paused.mp4");
+        let mut settings = Settings::default();
+        settings.recording.max_duration_secs = 1;
         let handle = RecorderHandle::start(
-            &Settings::default(),
+            &settings,
             RecordingFormat::Mp4,
             RecordingTarget::Region(primary_region(160, 120)),
             path,
@@ -512,15 +821,25 @@ mod tests {
         .unwrap();
 
         std::thread::sleep(Duration::from_millis(300));
-        handle.paused.store(true, Ordering::Relaxed);
+        handle.set_paused(true);
         assert!(handle.is_paused());
+        let frozen = handle.elapsed();
 
-        std::thread::sleep(Duration::from_millis(300));
-        handle.paused.store(false, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(handle.elapsed(), frozen, "timer advanced during pause");
+        assert!(
+            handle.is_running(),
+            "pause consumed the recording duration limit"
+        );
+        handle.set_paused(false);
         assert!(!handle.is_paused());
 
         std::thread::sleep(Duration::from_millis(300));
         let summary = handle.stop().unwrap();
+        assert!(
+            summary.duration < Duration::from_secs(1),
+            "pause remained in output duration"
+        );
         // Frames from before and after the pause, but not during it.
         assert!(summary.frames > 0);
     }

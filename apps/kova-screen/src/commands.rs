@@ -185,7 +185,7 @@ pub fn get_history(state: State<'_, Arc<AppState>>, limit: Option<u32>) -> CmdRe
 }
 
 /// Looks a capture up by id, which is the only way this module accepts a path.
-fn entry_of(state: &State<'_, Arc<AppState>>, id: i64) -> CmdResult<Entry> {
+fn entry_of(state: &AppState, id: i64) -> CmdResult<Entry> {
     let history = state
         .history()
         .ok_or_else(|| "History is unavailable in this session.".to_string())?;
@@ -256,18 +256,23 @@ pub fn copy_capture_url(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<(
     kova_platform::clipboard::set_text(&url).map_err(describe)
 }
 
-/// Uploads a capture on demand. Blocking, so the frontend shows a spinner.
+/// Keeps network I/O off the UI event loop while the frontend awaits the result.
 #[tauri::command]
-pub fn upload_capture(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<String> {
-    let entry = entry_of(&state, id)?;
-    let kind = kova_upload::MediaKind::from_path(&entry.path)
-        .ok_or_else(|| "That file type cannot be uploaded.".to_string())?;
+pub async fn upload_capture(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<String> {
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let entry = entry_of(&state, id)?;
+        let kind = kova_upload::MediaKind::from_path(&entry.path)
+            .ok_or_else(|| "That file type cannot be uploaded.".to_string())?;
 
-    let settings = state.settings();
-    let result =
-        crate::upload::run(state.inner(), entry.path.clone(), kind, Some(id)).map_err(describe)?;
+        let settings = state.settings();
+        let result =
+            crate::upload::run(&state, entry.path.clone(), kind, Some(id)).map_err(describe)?;
 
-    Ok(result.url_for(settings.upload.url_kind).to_string())
+        Ok(result.url_for(settings.upload.url_kind).to_string())
+    })
+    .await
+    .map_err(|err| format!("The upload worker failed: {err}"))?
 }
 
 /// Deletes the local file and forgets the row.
@@ -291,19 +296,24 @@ pub fn delete_capture_file(state: State<'_, Arc<AppState>>, id: i64) -> CmdResul
 /// the frontend, so the UI can offer this action without ever holding the
 /// capability itself.
 #[tauri::command]
-pub fn delete_capture_upload(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<()> {
-    let entry = entry_of(&state, id)?;
-    let delete_url = entry
-        .delete_url
-        .clone()
-        .ok_or_else(|| "That capture has no deletion link.".to_string())?;
+pub async fn delete_capture_upload(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<()> {
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let entry = entry_of(&state, id)?;
+        let delete_url = entry
+            .delete_url
+            .clone()
+            .ok_or_else(|| "That capture has no deletion link.".to_string())?;
 
-    kova_upload::vgy::visit_delete_url(&delete_url).map_err(describe)?;
+        kova_upload::vgy::visit_delete_url(&delete_url).map_err(describe)?;
 
-    if let Some(history) = state.history() {
-        history.clear_upload(id).map_err(describe)?;
-    }
-    Ok(())
+        if let Some(history) = state.history() {
+            history.clear_upload(id).map_err(describe)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|err| format!("The deletion worker failed: {err}"))?
 }
 
 /// Drops rows whose file the user removed outside the app.

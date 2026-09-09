@@ -174,7 +174,7 @@ impl Default for RecordingSettings {
             gif_fps: 15,
             quality: RecordingQuality::Medium,
             include_cursor: true,
-            hardware_encoding: true,
+            hardware_encoding: false,
             max_duration_secs: 1800,
             gif_max_size_mb: 32,
         }

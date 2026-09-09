@@ -28,6 +28,15 @@ static MANAGER: Mutex<Option<kova_platform::HotkeyManager>> = Mutex::new(None);
 /// [`AppState`] and surfaced in settings. Refusing to start because one
 /// shortcut is taken would be far worse than starting with five working ones.
 pub fn register<R: Runtime>(_app: &AppHandle<R>, state: &Arc<AppState>) {
+    replace_manager(state);
+}
+
+fn replace_manager(state: &Arc<AppState>) {
+    // Serialize the entire replacement, including unregistration and startup.
+    // Otherwise concurrent settings saves can register against a manager that
+    // another save has just installed, then replace it with a failed manager.
+    let mut manager_slot = MANAGER.lock();
+    drop(manager_slot.take());
     let settings = state.settings();
     let bindings: Vec<(String, String)> = settings
         .hotkeys
@@ -55,10 +64,7 @@ pub fn register<R: Runtime>(_app: &AppHandle<R>, state: &Arc<AppState>) {
                 );
             }
             state.set_hotkey_failures(failures);
-            // Replacing the previous manager drops it, which unregisters the
-            // old bindings before the new ones are already live -- the order is
-            // safe because `start` has already claimed what it could.
-            *MANAGER.lock() = Some(manager);
+            *manager_slot = Some(manager);
         }
         Err(err) => {
             tracing::error!(%err, "no hotkeys could be registered");
@@ -74,9 +80,6 @@ pub fn register<R: Runtime>(_app: &AppHandle<R>, state: &Arc<AppState>) {
 
 /// Drops the current manager and registers the current settings again.
 pub fn reregister<R: Runtime>(app: &AppHandle<R>, state: &Arc<AppState>) {
-    // Release the old bindings first, so re-registering the *same* shortcut
-    // does not collide with our own previous registration.
-    *MANAGER.lock() = None;
     register(app, state);
 }
 
@@ -88,6 +91,40 @@ pub fn shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_replacements_keep_home_registered() {
+        let mut settings = kova_screen_core::settings::Settings::default();
+        settings.hotkeys.region_screenshot = "Home".into();
+        let state = AppState::for_test(settings);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let state = Arc::clone(&state);
+                scope.spawn(move || {
+                    for _ in 0..5 {
+                        replace_manager(&state);
+                    }
+                });
+            }
+        });
+        assert!(
+            !state
+                .hotkey_failures()
+                .iter()
+                .any(|failure| failure.binding == "Home")
+        );
+        let binding = vec![("probe".into(), "Home".into())];
+        let (probe, failures) = kova_platform::HotkeyManager::start(&binding, |_| {}).unwrap();
+        assert!(
+            failures.iter().any(|failure| failure.taken_by_another_app),
+            "Home lost its registration"
+        );
+        drop(probe);
+        shutdown();
+        let (probe, failures) = kova_platform::HotkeyManager::start(&binding, |_| {}).unwrap();
+        assert!(failures.is_empty(), "Home was not released");
+        drop(probe);
+    }
 
     #[test]
     fn the_default_bindings_all_map_to_actions() {

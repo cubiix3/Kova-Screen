@@ -1,39 +1,15 @@
 //! Toast notifications.
 //!
-//! A thin wrapper over the Tauri notification plugin, with the app handle
-//! stashed globally so the capture pipeline can raise a toast without every
-//! function threading a handle through.
+//! Native status cards work for installed and portable builds alike, without
+//! relying on Windows notification registration or creating a WebView.
 //!
 //! Notifications are decoration: a failure here is logged and swallowed,
 //! because a toast that could not be shown must never turn a successful capture
 //! into a failed one.
 
-use std::sync::OnceLock;
-
-use tauri::AppHandle;
-use tauri_plugin_notification::NotificationExt;
-
-static HANDLE: OnceLock<AppHandle> = OnceLock::new();
-
-/// Records the app handle. Called once during setup.
-pub fn init(handle: AppHandle) {
-    let _ = HANDLE.set(handle);
-}
-
-/// Shows a toast, or does nothing if notifications are unavailable.
+/// Shows a native status card at the bottom-right of the current monitor.
 pub fn show(title: &str, body: &str) {
-    let Some(handle) = HANDLE.get() else {
-        tracing::debug!(title, "no app handle yet; skipping the notification");
-        return;
-    };
-
-    if let Err(err) = handle
-        .notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .show()
-    {
+    if let Err(err) = kova_platform::overlay::status::show(title, body) {
         tracing::warn!(%err, "could not show a notification");
     }
 }

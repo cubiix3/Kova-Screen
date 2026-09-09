@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use kova_screen_core::{Bitmap, Error, Rect, Result};
+#[cfg(test)]
 use parking_lot::Mutex;
 use windows::Graphics::Capture::Direct3D11CaptureFramePool;
 use windows::Graphics::DirectX::DirectXPixelFormat;
@@ -35,6 +36,18 @@ use crate::d3d::{D3dDevice, texture_from_surface};
 /// Called on the capture thread. An implementation that blocks slows capture
 /// down, so encoders hand work to their own thread rather than encoding inline.
 pub trait FrameSink: Send {
+    /// A sink may end capture normally once its output budget is exhausted.
+    fn is_finished(&self) -> bool {
+        false
+    }
+    /// Output timeline; recorders can exclude pauses from elapsed time.
+    fn elapsed(&self, wall_time: Duration) -> Duration {
+        wall_time
+    }
+    /// Paused recorders can skip GPU readback and frame copies altogether.
+    fn is_paused(&self) -> bool {
+        false
+    }
     /// Called once per output frame, in order.
     ///
     /// `timestamp` is measured from the start of the recording, which is what
@@ -207,15 +220,41 @@ impl Drop for CaptureSession {
 
 /// Owns the GPU resources for one session. Lives entirely on the capture thread.
 struct CapturePump {
-    device: D3dDevice,
-    pool: Direct3D11CaptureFramePool,
     session: windows::Graphics::Capture::GraphicsCaptureSession,
+    pool: Direct3D11CaptureFramePool,
     crop: Option<Rect>,
-    latest: Arc<Mutex<Option<Bitmap>>>,
+    latest: Option<Bitmap>,
+    device: D3dDevice,
+    // Drop COM objects first, then uninitialise their apartment on this thread.
+    _apartment: CaptureApartment,
+}
+
+struct CaptureApartment;
+
+impl CaptureApartment {
+    fn new() -> Result<Self> {
+        unsafe {
+            windows::Win32::System::WinRT::RoInitialize(
+                windows::Win32::System::WinRT::RO_INIT_MULTITHREADED,
+            )
+        }
+        .map_err(|e| Error::Capture(format!("could not initialise the capture apartment: {e}")))?;
+        Ok(Self)
+    }
+}
+
+impl Drop for CaptureApartment {
+    fn drop(&mut self) {
+        // SAFETY: balances the successful RoInitialize on the capture thread.
+        unsafe {
+            windows::Win32::System::WinRT::RoUninitialize();
+        }
+    }
 }
 
 impl CapturePump {
     fn new(options: SessionOptions) -> Result<Self> {
+        let apartment = CaptureApartment::new()?;
         let (item, crop) = match options.target {
             SessionTarget::Monitor(id, crop) => (crate::wgc::item_for_monitor(id)?, crop),
             SessionTarget::Window(id) => (crate::wgc::item_for_window(id)?, None),
@@ -251,7 +290,8 @@ impl CapturePump {
             pool,
             session,
             crop,
-            latest: Arc::new(Mutex::new(None)),
+            latest: None,
+            _apartment: apartment,
         })
     }
 
@@ -260,24 +300,35 @@ impl CapturePump {
     /// Draining matters: if the target repaints faster than `fps` the pool fills
     /// with stale frames, and taking the first would make the recording lag
     /// further behind real time with every tick.
-    fn pull_newest(&self) -> Result<bool> {
-        let mut got = false;
-        while let Ok(frame) = self.pool.TryGetNextFrame() {
-            let surface = match frame.Surface() {
-                Ok(s) => s,
-                Err(_) => break,
+    fn pull_newest(&mut self) -> Result<bool> {
+        let mut newest = None;
+        // The pool has two slots. Bound draining so a fast producer cannot
+        // keep us busy indefinitely; only read back the final frame to the CPU.
+        for _ in 0..2 {
+            let Ok(frame) = self.pool.TryGetNextFrame() else {
+                break;
             };
-            let texture = texture_from_surface(&surface)?;
-            let bitmap = self.device.texture_to_bitmap(&texture, self.crop)?;
-            *self.latest.lock() = Some(bitmap);
-            let _ = frame.Close();
-            got = true;
+            if let Some(previous) = newest.replace(frame) {
+                let _ = previous.Close();
+            }
         }
-        Ok(got)
+        let Some(frame) = newest else {
+            return Ok(false);
+        };
+        let result = (|| {
+            let surface = frame
+                .Surface()
+                .map_err(|e| Error::Capture(format!("could not read the capture surface: {e}")))?;
+            let texture = texture_from_surface(&surface)?;
+            self.device.texture_to_bitmap(&texture, self.crop)
+        })();
+        let _ = frame.Close();
+        self.latest = Some(result?);
+        Ok(true)
     }
 
     fn run(
-        self,
+        mut self,
         interval: Duration,
         max_duration: Option<Duration>,
         stop: &AtomicBool,
@@ -289,8 +340,11 @@ impl CapturePump {
         let mut result = Ok(());
 
         while !stop.load(Ordering::Relaxed) {
+            if sink.is_finished() {
+                break;
+            }
             let now = Instant::now();
-            let elapsed = now.duration_since(start);
+            let elapsed = sink.elapsed(now.duration_since(start));
 
             if max_duration.is_some_and(|limit| elapsed >= limit) {
                 tracing::info!("recording reached its duration limit");
@@ -303,6 +357,12 @@ impl CapturePump {
                 continue;
             }
 
+            if sink.is_paused() {
+                std::thread::sleep(Duration::from_millis(100));
+                next_tick = Instant::now();
+                continue;
+            }
+
             let fresh = match self.pull_newest() {
                 Ok(fresh) => fresh,
                 Err(err) => {
@@ -311,13 +371,12 @@ impl CapturePump {
                 }
             };
 
-            let frame = self.latest.lock().clone();
-            match frame {
+            match self.latest.as_ref() {
                 Some(bitmap) => {
                     if !fresh {
                         counter.duplicated.fetch_add(1, Ordering::Relaxed);
                     }
-                    if let Err(err) = sink.on_frame(&bitmap, elapsed) {
+                    if let Err(err) = sink.on_frame(bitmap, elapsed) {
                         result = Err(err);
                         break;
                     }

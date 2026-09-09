@@ -40,7 +40,29 @@ const FRAME_TIMEOUT: Duration = Duration::from_millis(1200);
 
 /// Whether this Windows build supports Windows Graphics Capture.
 pub fn is_supported() -> bool {
+    if keep_capture_apartment_alive().is_err() {
+        return false;
+    }
     GraphicsCaptureSession::IsSupported().unwrap_or(false)
+}
+
+/// WinRT caches agile activation factories across capture threads. Their MTA
+/// must survive between sessions or subsequent calls can return CO_E_OBJNOTCONNECTED.
+/// This single process-lifetime COM cookie retains no frame pool or GPU device.
+fn keep_capture_apartment_alive() -> Result<()> {
+    static COOKIE: std::sync::OnceLock<std::result::Result<usize, String>> =
+        std::sync::OnceLock::new();
+    COOKIE
+        .get_or_init(|| {
+            // The process owns this bounded runtime reference until termination,
+            // just as it owns the cached WinRT factory interfaces.
+            unsafe { windows::Win32::System::Com::CoIncrementMTAUsage() }
+                .map(|cookie| cookie.0 as usize)
+                .map_err(|e| format!("could not initialise the capture runtime: {e}"))
+        })
+        .as_ref()
+        .map(|_| ())
+        .map_err(|e| Error::Capture(e.clone()))
 }
 
 /// Builds a capture item for a window.
@@ -58,9 +80,14 @@ pub fn item_for_window(id: WindowId) -> Result<GraphicsCaptureItem> {
 
 /// Builds a capture item for a monitor.
 pub fn item_for_monitor(id: MonitorId) -> Result<GraphicsCaptureItem> {
+    // Some Windows builds access-violate on an invalid HMONITOR instead of
+    // returning an HRESULT. Reject detached/stale displays before entering WGC.
+    if crate::monitor::find(id).is_none() {
+        return Err(Error::Capture("that display is no longer connected".into()));
+    }
     let interop = capture_interop()?;
     let hmonitor = HMONITOR(id.0 as *mut core::ffi::c_void);
-    // SAFETY: a stale HMONITOR yields an error HRESULT rather than a fault.
+    // SAFETY: id belongs to a currently enumerated display.
     unsafe { interop.CreateForMonitor::<GraphicsCaptureItem>(hmonitor) }
         .map_err(|e| Error::Capture(format!("this display cannot be captured: {e}")))
 }
@@ -71,8 +98,41 @@ fn capture_interop() -> Result<IGraphicsCaptureItemInterop> {
             "windows graphics capture needs windows 10 version 1903 or newer".into(),
         ));
     }
-    windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
-        .map_err(|e| Error::Capture(format!("graphics capture is unavailable: {e}")))
+    let factory = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
+        .map_err(|e| Error::Capture(format!("graphics capture is unavailable: {e}")))?;
+    keep_capture_module_loaded()?;
+    Ok(factory)
+}
+
+/// Windows can still be winding down a capture worker after Close returns.
+/// Unloading GraphicsCapture.dll then causes an execute access violation in
+/// that worker (reproduced by the lifecycle probe, including capture-only).
+/// Pin this one OS code module for the process lifetime, not any capture
+/// session, frame pool or GPU buffers. Never add a timing-dependent sleep.
+/// See https://github.com/robmikh/Win32CaptureSample/issues/99.
+fn keep_capture_module_loaded() -> Result<()> {
+    static PINNED: std::sync::OnceLock<std::result::Result<(), String>> =
+        std::sync::OnceLock::new();
+    PINNED
+        .get_or_init(|| {
+            use windows::Win32::System::LibraryLoader::{
+                GET_MODULE_HANDLE_EX_FLAG_PIN, GetModuleHandleExW,
+            };
+            let mut module = windows::Win32::Foundation::HMODULE::default();
+            // SAFETY: activation above has loaded the OS capture module. PIN is an
+            // explicit process-lifetime reference, released by Windows at exit.
+            unsafe {
+                GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_PIN,
+                    &HSTRING::from("GraphicsCapture.dll"),
+                    &mut module,
+                )
+            }
+            .map_err(|e| format!("could not retain the capture runtime: {e}"))
+        })
+        .as_ref()
+        .map(|_| ())
+        .map_err(|e| Error::Capture(e.clone()))
 }
 
 /// Captures a single frame of `item`.
