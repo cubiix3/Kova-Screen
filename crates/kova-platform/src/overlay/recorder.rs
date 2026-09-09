@@ -30,22 +30,23 @@
 //! ~230x40 pixels it occupies.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
-use kova_screen_core::{Error, Result};
+use kova_screen_core::{Error, Rect, Result};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW,
     EndPaint, FillRect, HBRUSH, HDC, HGDIOBJ, InvalidateRect, PAINTSTRUCT, SelectObject, SetBkMode,
     SetTextColor, SetWindowRgn, TRANSPARENT,
 };
+use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     GWLP_USERDATA, GetWindowLongPtrW, HTCAPTION, KillTimer, MSG, PM_REMOVE, PeekMessageW,
     PostQuitMessage, SW_SHOWNOACTIVATE, SetTimer, SetWindowDisplayAffinity, SetWindowLongPtrW,
-    ShowWindow, TranslateMessage, WDA_EXCLUDEFROMCAPTURE, WM_DESTROY, WM_LBUTTONDOWN, WM_NCCREATE,
-    WM_NCHITTEST, WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    ShowWindow, TranslateMessage, WDA_EXCLUDEFROMCAPTURE, WM_DESTROY, WM_LBUTTONDOWN, WM_MOUSEMOVE,
+    WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP,
 };
 use windows_core::{HSTRING, PCWSTR};
@@ -108,6 +109,7 @@ pub struct RecorderState {
     pause_requested: AtomicBool,
     /// False when this Windows build cannot exclude the overlay from capture.
     excluded: AtomicBool,
+    hovered: AtomicU8,
 }
 
 impl RecorderState {
@@ -159,6 +161,11 @@ impl RecorderOverlay {
     ///
     /// Returns as soon as the window exists.
     pub fn show() -> Result<Self> {
+        Self::show_for_region(None)
+    }
+
+    /// Shows the controls and an excluded, click-through recording boundary.
+    pub fn show_for_region(region: Option<Rect>) -> Result<Self> {
         let state = Arc::new(RecorderState::default());
         let close = Arc::new(AtomicBool::new(false));
 
@@ -169,7 +176,7 @@ impl RecorderOverlay {
         let thread = std::thread::Builder::new()
             .name("kova-recorder-overlay".into())
             .spawn(
-                move || match OverlayWindow::create(Arc::clone(&thread_state)) {
+                move || match OverlayWindow::create(Arc::clone(&thread_state), region) {
                     Ok(window) => {
                         let _ = ready_tx.send(Ok(()));
                         window.run(&thread_close);
@@ -227,10 +234,14 @@ struct OverlayWindow {
     /// through `GWLP_USERDATA`. An `Arc` allocation address is stable, so the
     /// pointer stays valid however this handle is moved.
     _state: Arc<RecorderState>,
+    _boundary: Option<super::boundary::BoundaryWindow>,
 }
 
 impl OverlayWindow {
-    fn create(state: Arc<RecorderState>) -> Result<Self> {
+    fn create(state: Arc<RecorderState>, region: Option<Rect>) -> Result<Self> {
+        let boundary = region
+            .map(super::boundary::BoundaryWindow::create)
+            .transpose()?;
         let class = register_class()?;
         let module = ModuleHandle::current()?;
 
@@ -283,6 +294,7 @@ impl OverlayWindow {
         Ok(Self {
             hwnd,
             _state: state,
+            _boundary: boundary,
         })
     }
 
@@ -297,7 +309,16 @@ impl OverlayWindow {
                     DispatchMessageW(&msg);
                 }
             }
-            std::thread::sleep(Duration::from_millis(16));
+            // Sleep until input or the timer arrives, with a bounded wait for
+            // close requests from the recording thread. No 60 Hz polling.
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx(
+                    None,
+                    100,
+                    windows::Win32::UI::WindowsAndMessaging::QS_ALLINPUT,
+                    windows::Win32::UI::WindowsAndMessaging::MWMO_INPUTAVAILABLE,
+                );
+            }
         }
 
         // SAFETY: `hwnd` is live and destroyed exactly once.
@@ -392,6 +413,13 @@ fn register_class() -> Result<Vec<u16>> {
         style: CS_HREDRAW | CS_VREDRAW,
         lpfnWndProc: Some(window_proc),
         hInstance: module.handle().into(),
+        hCursor: unsafe {
+            windows::Win32::UI::WindowsAndMessaging::LoadCursorW(
+                None,
+                windows::Win32::UI::WindowsAndMessaging::IDC_ARROW,
+            )
+        }
+        .unwrap_or_default(),
         lpszClassName: win32::class_ptr(&class_name),
         ..Default::default()
     };
@@ -429,6 +457,36 @@ unsafe extern "system" fn window_proc(
     let state = unsafe { &*ptr };
 
     match msg {
+        WM_MOUSEMOVE => {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{
+                TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+            };
+            let x = (lparam.0 & 0xFFFF) as u16 as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+            let hovered = button_at(x, y);
+            if state.hovered.swap(hovered, Ordering::Relaxed) != hovered {
+                unsafe {
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+            }
+            let mut track = TRACKMOUSEEVENT {
+                cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                ..Default::default()
+            };
+            unsafe {
+                let _ = TrackMouseEvent(&mut track);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            state.hovered.store(0, Ordering::Relaxed);
+            unsafe {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            LRESULT(0)
+        }
         WM_PAINT => {
             paint(hwnd, state);
             LRESULT(0)
@@ -442,9 +500,10 @@ unsafe extern "system" fn window_proc(
         }
         WM_LBUTTONDOWN => {
             let x = (lparam.0 & 0xFFFF) as u16 as i16 as i32;
-            if (PAUSE_X..PAUSE_X + BUTTON_W).contains(&x) {
+            let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+            if button_at(x, y) == 1 {
                 state.pause_requested.store(true, Ordering::Relaxed);
-            } else if (STOP_X..STOP_X + BUTTON_W).contains(&x) {
+            } else if button_at(x, y) == 2 {
                 state.stop_requested.store(true, Ordering::Relaxed);
             }
             // SAFETY: `hwnd` is live.
@@ -464,7 +523,7 @@ unsafe extern "system" fn window_proc(
             unsafe {
                 let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut point);
             }
-            if point.x < PAUSE_X {
+            if point.x < PAUSE_X - 4 {
                 return LRESULT(HTCAPTION as isize);
             }
             default
@@ -534,7 +593,22 @@ fn draw(hdc: HDC, state: &RecorderState) {
         SetTextColor(hdc, COLORREF(theme::TEXT));
         text_at(hdc, &format_elapsed(state.elapsed()), 34, 84);
 
-        SetTextColor(hdc, COLORREF(theme::MUTED));
+        for (id, x) in [(1, PAUSE_X), (2, STOP_X)] {
+            let active = state.hovered.load(Ordering::Relaxed) == id;
+            let brush = CreateSolidBrush(COLORREF(if active { 0x0054_4437 } else { 0x0032_2B26 }));
+            FillRect(
+                hdc,
+                &RECT {
+                    left: x - 4,
+                    top: 5,
+                    right: x + BUTTON_W - 2,
+                    bottom: HEIGHT - 5,
+                },
+                brush,
+            );
+            let _ = DeleteObject(HGDIOBJ(brush.0));
+        }
+        SetTextColor(hdc, COLORREF(theme::TEXT));
         text_at(
             hdc,
             if paused { "Resume" } else { "Pause" },
@@ -547,6 +621,19 @@ fn draw(hdc: HDC, state: &RecorderState) {
             SelectObject(hdc, previous_font);
         }
         let _ = DeleteObject(HGDIOBJ(font.0));
+    }
+}
+
+fn button_at(x: i32, y: i32) -> u8 {
+    if !(5..HEIGHT - 5).contains(&y) {
+        return 0;
+    }
+    if (PAUSE_X - 4..PAUSE_X + BUTTON_W - 2).contains(&x) {
+        1
+    } else if (STOP_X - 4..STOP_X + BUTTON_W - 2).contains(&x) {
+        2
+    } else {
+        0
     }
 }
 
@@ -585,6 +672,59 @@ pub fn format_elapsed(elapsed: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mouse_messages_update_hover_and_dispatch_the_matching_button() {
+        kova_capture::require_interactive_desktop!();
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetCursorPos, GetWindowRect, SendMessageW, SetCursorPos,
+        };
+        struct RestoreCursor(windows::Win32::Foundation::POINT);
+        impl Drop for RestoreCursor {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = SetCursorPos(self.0.x, self.0.y);
+                }
+            }
+        }
+        let mut previous = windows::Win32::Foundation::POINT::default();
+        unsafe {
+            GetCursorPos(&mut previous).unwrap();
+        }
+        let _restore = RestoreCursor(previous);
+        let mut overlay = RecorderOverlay::show().unwrap();
+        let hwnd = find_overlay_window().unwrap();
+        let state = overlay.state();
+        let mut bounds = RECT::default();
+        unsafe {
+            GetWindowRect(hwnd, &mut bounds).unwrap();
+        }
+        for (x, id) in [(PAUSE_X + 8, 1), (STOP_X + 8, 2)] {
+            // Real cursor placement prevents TrackMouseEvent immediately
+            // delivering WM_MOUSELEAVE for synthetic moves outside the window.
+            unsafe {
+                SetCursorPos(bounds.left + x, bounds.top + 20).unwrap();
+            }
+            // Let the OS deliver enter/leave events caused by cursor warping
+            // before testing the synchronously dispatched button message.
+            std::thread::sleep(Duration::from_millis(80));
+            let point = LPARAM(((20 << 16) | x) as isize);
+            unsafe {
+                SendMessageW(hwnd, WM_MOUSEMOVE, None, Some(point));
+            }
+            assert_eq!(state.hovered.load(Ordering::Relaxed), id);
+            unsafe {
+                SendMessageW(hwnd, WM_LBUTTONDOWN, None, Some(point));
+            }
+            assert_eq!(state.take_pause_request(), id == 1);
+            assert_eq!(state.take_stop_request(), id == 2);
+        }
+        unsafe {
+            SendMessageW(hwnd, WM_MOUSELEAVE, None, None);
+        }
+        assert_eq!(state.hovered.load(Ordering::Relaxed), 0);
+        overlay.close();
+    }
 
     #[test]
     fn elapsed_time_formats_as_minutes_and_seconds() {

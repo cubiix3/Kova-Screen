@@ -65,7 +65,7 @@ jobs:
           cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace -- --test-threads=1
 
       - name: Build the installer
         run: npx --yes @tauri-apps/cli@2 build --config apps/kova-screen/tauri.conf.json

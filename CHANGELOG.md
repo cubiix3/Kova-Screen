@@ -7,6 +7,36 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-09
+
+### Fixed
+
+- Serialize hotkey replacement so concurrent settings updates cannot leave
+  shortcuts unregistered; ignore held-key repeats while editing shortcuts.
+- Normalize the Space key to the spelling accepted by the hotkey parser.
+
+- Exclude pauses from recording timestamps, the timer and the duration limit.
+- Stop GIF capture automatically when its size budget is reached.
+- Apply screenshot delay and cursor preferences to region selections.
+- Bound automatic uploads to one worker and eight queued files; report saturation.
+- Ignore repeated capture actions while a selection or startup is in progress.
+- Keep manual upload and online deletion off the UI event loop; show upload
+  progress and disable conflicting row actions while an upload is pending.
+- Default new settings to software encoding; label the optional hardware path
+  experimental because its native resource-retention issue is not resolved.
+
+- Compose region selections off-screen to prevent the dimmed desktop flickering.
+- Create only one tray icon.
+- Keep the tray app running after the last settings/history window closes.
+- Add hover feedback to recorder controls and a click-through recording outline.
+- Show compact, rounded status cards at the bottom-right, including portable builds.
+- Avoid full-frame clones and redundant GPU readbacks; skip readback while paused.
+- Reuse the Media Foundation runtime across recordings to reduce native worker
+  handle growth, and shut it down when the application exits.
+- Keep the Windows capture code module loaded to prevent a native teardown
+  crash; capture sessions, frame pools and GPU buffers are still released.
+- Release the overlay device context when bitmap allocation fails.
+
 ## [0.1.0] - 2026-09-07
 
 First release.
@@ -64,5 +94,6 @@ First release.
 - HDR displays are captured in SDR
 - Window capture uses the foreground window rather than offering a picker
 
-[Unreleased]: https://github.com/cubiix3/Kova-Screen/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/cubiix3/Kova-Screen/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/cubiix3/Kova-Screen/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cubiix3/Kova-Screen/releases/tag/v0.1.0

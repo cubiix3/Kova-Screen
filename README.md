@@ -35,8 +35,9 @@ Everything listed here is implemented and covered by tests.
 
 ### Recording
 
-- **MP4** — H.264 via Media Foundation, using a hardware encoder when your GPU
-  offers one and the Microsoft software encoder otherwise. 30 or 60 FPS.
+- **MP4** — H.264 via Media Foundation, using software encoding by default.
+  Optional hardware encoding is experimental because some native encoders retain
+  resources between recordings. 30 or 60 FPS.
 - **GIF** — 10/15/20/30 FPS, default 15. Frames are quantised and written
   straight to the file, so no temporary frame folder is ever created.
 - A small floating overlay shows the elapsed time with Pause and Stop. It is

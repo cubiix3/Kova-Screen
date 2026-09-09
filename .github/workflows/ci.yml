@@ -54,7 +54,9 @@ jobs:
         # need real pixels detect that and skip themselves with a printed
         # reason. Everything else -- geometry, encoders, parsing, storage,
         # secret handling -- runs here for real.
-        run: cargo test --workspace -- --nocapture
+        # Native overlay tests measure process-wide GDI/USER counts and share
+        # window classes, so keep their resource lifetimes separate.
+        run: cargo test --workspace -- --nocapture --test-threads=1
 
   frontend:
     name: Frontend

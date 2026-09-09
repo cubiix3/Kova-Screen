@@ -84,7 +84,7 @@ function toolbar(root: HTMLElement): HTMLElement {
 
 function row(root: HTMLElement, capture: Capture): HTMLElement {
   const isImage = capture.kind === "screenshot" || capture.kind === "gif";
-  const disabled = busy === capture.id;
+  const disabled = busy !== null;
 
   const action = (label: string, run_: () => Promise<unknown>, className?: string) =>
     h(
@@ -125,7 +125,7 @@ function row(root: HTMLElement, capture: Capture): HTMLElement {
         ? action("URL", () =>
             api.copyCaptureUrl(capture.id).then(() => toast("Link copied.")),
           )
-        : action("Upload", async () => {
+        : action(busy === capture.id ? "Uploading…" : "Upload", async () => {
             busy = capture.id;
             draw(root);
             const url = await api.uploadCapture(capture.id);

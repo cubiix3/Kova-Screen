@@ -36,7 +36,7 @@ Run what CI runs:
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo test --workspace -- --test-threads=1
 cd ui && npm run lint && npm run build
 ```
 

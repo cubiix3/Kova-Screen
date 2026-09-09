@@ -19,15 +19,45 @@ use crate::notify;
 /// Never blocks the caller and never returns an error: everything is surfaced
 /// through a notification and the history row.
 pub fn spawn(state: Arc<AppState>, path: PathBuf, kind: MediaKind, history_id: Option<i64>) {
-    let spawned = std::thread::Builder::new()
-        .name("kova-upload".into())
-        .spawn(move || {
-            let outcome = run(&state, path, kind, history_id);
-            report(&state, kind, outcome);
-        });
-
-    if let Err(err) = spawned {
-        tracing::error!(%err, "could not start the upload thread");
+    struct Job {
+        state: Arc<AppState>,
+        path: PathBuf,
+        kind: MediaKind,
+        history_id: Option<i64>,
+    }
+    static QUEUE: std::sync::OnceLock<
+        std::result::Result<std::sync::mpsc::SyncSender<Job>, String>,
+    > = std::sync::OnceLock::new();
+    let queue = QUEUE.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Job>(8);
+        std::thread::Builder::new()
+            .name("kova-upload".into())
+            .spawn(move || {
+                while let Ok(job) = receiver.recv() {
+                    let outcome = run(&job.state, job.path, job.kind, job.history_id);
+                    report(&job.state, job.kind, outcome);
+                }
+            })
+            .map(|_| sender)
+            .map_err(|err| err.to_string())
+    });
+    let queued = match queue {
+        Ok(sender) => sender
+            .try_send(Job {
+                state: Arc::clone(&state),
+                path,
+                kind,
+                history_id,
+            })
+            .is_ok(),
+        Err(_) => false,
+    };
+    if !queued {
+        notify::show_if_enabled(
+            &state.settings(),
+            "Upload not started",
+            "The upload queue is unavailable or full. Your file is saved; retry from Recent Captures.",
+        );
     }
 }
 

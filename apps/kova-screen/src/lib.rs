@@ -71,7 +71,6 @@ pub fn run() {
         .invoke_handler(commands::handlers())
         .setup(move |app| {
             let handle = app.handle().clone();
-            notify::init(handle.clone());
 
             tray::build(&handle)?;
             hotkeys::register(&handle, &state);
@@ -103,8 +102,17 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("kova screen failed to start")
         .run(|_app, event| {
-            if let tauri::RunEvent::Exit = event {
-                hotkeys::shutdown();
+            match event {
+                // Closing the last WebView must leave the tray and hotkeys
+                // alive. Explicit Exit/Restart carries a code and is allowed.
+                tauri::RunEvent::ExitRequested {
+                    code: None, api, ..
+                } => api.prevent_exit(),
+                tauri::RunEvent::Exit => {
+                    hotkeys::shutdown();
+                    kova_encode::mp4::shutdown_runtime();
+                }
+                _ => {}
             }
         });
 }

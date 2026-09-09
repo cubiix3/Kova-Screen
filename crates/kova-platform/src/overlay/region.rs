@@ -40,8 +40,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, HCURSOR, IDC_CROSS, LoadCursorW, MSG,
     PostQuitMessage, SW_SHOW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TranslateMessage,
-    WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT,
-    WM_RBUTTONDOWN, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
+    WM_PAINT, WM_RBUTTONDOWN, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows_core::{HSTRING, PCWSTR};
 
@@ -88,7 +88,12 @@ const READOUT_W: i32 = 116;
 /// spawn a thread for it rather than blocking the UI thread, which would freeze
 /// the tray while the overlay is up.
 pub fn select() -> Result<Option<Selection>> {
-    let Some((rect, desktop, origin)) = show_overlay()? else {
+    select_with_cursor(false)
+}
+
+/// Captures the pointer with the frozen desktop, before selection changes it.
+pub fn select_with_cursor(include_cursor: bool) -> Result<Option<Selection>> {
+    let Some((rect, desktop, origin)) = show_overlay(include_cursor)? else {
         return Ok(None);
     };
     let bitmap = desktop.crop(rect.to_local(origin))?;
@@ -101,16 +106,20 @@ pub fn select() -> Result<Option<Selection>> {
 /// recording captures live frames afterwards, so cropping the frozen desktop
 /// would only cost a pointless copy of a potentially very large bitmap.
 pub fn select_rect() -> Result<Option<Rect>> {
-    Ok(show_overlay()?.map(|(rect, _, _)| rect))
+    Ok(show_overlay(false)?.map(|(rect, _, _)| rect))
 }
 
 /// Runs the overlay, returning the selection, the frozen desktop it was drawn
 /// from, and that bitmap origin on the virtual desktop.
-fn show_overlay() -> Result<Option<(Rect, Bitmap, Point)>> {
+fn show_overlay(include_cursor: bool) -> Result<Option<(Rect, Bitmap, Point)>> {
     let desktop_rect = kova_capture::monitor::virtual_desktop_bounds()?;
     // Capture first, then show the window, so the overlay itself can never
     // appear in the frozen frame.
-    let desktop = kova_capture::gdi::capture_rect(desktop_rect)?;
+    let mut desktop = kova_capture::gdi::capture_rect(desktop_rect)?;
+    if include_cursor && let Err(err) = kova_capture::cursor::draw_into(&mut desktop, desktop_rect)
+    {
+        tracing::warn!(%err, "could not include cursor in region capture");
+    }
 
     let mut state = Box::new(OverlayState::new(desktop_rect, desktop)?);
     let state_ptr = std::ptr::from_mut(state.as_mut());
@@ -245,6 +254,8 @@ struct OverlayState {
     desktop: Bitmap,
     /// The frozen desktop as a GDI bitmap, ready to blit.
     frozen: FrozenDesktop,
+    /// Reused composition surface; intermediate bright/dim passes stay off-screen.
+    back_buffer: FrozenDesktop,
     anchor: Option<Point>,
     cursor: Point,
     dragging: bool,
@@ -254,10 +265,12 @@ struct OverlayState {
 impl OverlayState {
     fn new(rect: Rect, desktop: Bitmap) -> Result<Self> {
         let frozen = FrozenDesktop::new(&desktop)?;
+        let back_buffer = FrozenDesktop::new(&desktop)?;
         Ok(Self {
             origin: Point::new(rect.x, rect.y),
             desktop,
             frozen,
+            back_buffer,
             anchor: None,
             cursor: Point::new(0, 0),
             dragging: false,
@@ -312,6 +325,10 @@ impl FrozenDesktop {
         let bitmap =
             unsafe { CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0) }
                 .map_err(|e| {
+                    // No owner exists yet if DIB allocation fails.
+                    unsafe {
+                        let _ = DeleteDC(dc);
+                    }
                     Error::Platform(format!("could not allocate the overlay bitmap: {e}"))
                 })?;
 
@@ -385,6 +402,10 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // BeginPaint can send this synchronously; do not reborrow the state.
+    if msg == WM_ERASEBKGND {
+        return LRESULT(1);
+    }
     // The state pointer is stashed at creation and read back on every message.
     if msg == WM_NCCREATE {
         // SAFETY: for WM_NCCREATE, lparam is a CREATESTRUCTW whose
@@ -505,15 +526,34 @@ fn paint(hwnd: HWND, state: &OverlayState) {
     let mut ps = PAINTSTRUCT::default();
     // SAFETY: `ps` is a live local; BeginPaint is balanced by EndPaint below.
     let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
-    if hdc.is_invalid() {
-        return;
+    if !hdc.is_invalid() {
+        present(hdc, state);
     }
-
-    draw(hdc, state);
 
     // SAFETY: balances BeginPaint.
     unsafe {
         let _ = EndPaint(hwnd, &ps);
+    }
+}
+
+/// Compose off-screen, then publish only the finished frame to the window DC.
+fn present(hdc: HDC, state: &OverlayState) {
+    draw(state.back_buffer.dc, state);
+
+    // SAFETY: both DCs are live. The buffer covers the entire overlay; the
+    // destination paint DC clips the copy to the invalidated region.
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::BitBlt(
+            hdc,
+            0,
+            0,
+            state.back_buffer.width,
+            state.back_buffer.height,
+            Some(state.back_buffer.dc),
+            0,
+            0,
+            SRCCOPY,
+        );
     }
 }
 
@@ -788,6 +828,56 @@ mod tests {
             let frozen = FrozenDesktop::new(&desktop(320, 240)).expect("frozen desktop");
             assert_eq!((frozen.width, frozen.height), (320, 240));
         }
+    }
+
+    #[test]
+    fn repaint_keeps_the_outside_dim_and_restores_previous_selections() {
+        use windows::Win32::Graphics::Gdi::GetPixel;
+
+        let mut state = OverlayState::new(Rect::new(0, 0, 320, 240), desktop(320, 240)).unwrap();
+        let output = FrozenDesktop::new(&desktop(320, 240)).unwrap();
+        // GetPixel synchronises GDI drawing before inspecting the destination.
+        let pixel = |dc, x, y| unsafe { GetPixel(dc, x, y) };
+        let original = pixel(state.frozen.dc, 30, 30);
+        present(output.dc, &state);
+        let dimmed = pixel(output.dc, 30, 30);
+        assert_ne!(dimmed, original);
+        let outside = pixel(output.dc, 280, 200);
+
+        state.anchor = Some(Point::new(10, 10));
+        state.cursor = Point::new(100, 100);
+        for _ in 0..5 {
+            present(output.dc, &state);
+            assert_eq!(pixel(output.dc, 30, 30), original);
+            assert_eq!(pixel(output.dc, 280, 200), outside);
+        }
+
+        state.anchor = Some(Point::new(150, 10));
+        state.cursor = Point::new(250, 100);
+        present(output.dc, &state);
+        assert_eq!(pixel(output.dc, 30, 30), dimmed);
+        assert_eq!(pixel(output.dc, 280, 200), outside);
+        assert_eq!(pixel(state.frozen.dc, 30, 30), original);
+        assert_eq!(pixel(output.dc, 200, 30), pixel(state.frozen.dc, 200, 30));
+    }
+
+    #[test]
+    fn repeated_composition_releases_all_gdi_objects() {
+        use windows::Win32::System::Threading::{
+            GR_GDIOBJECTS, GetCurrentProcess, GetGuiResources,
+        };
+        let cycle = || {
+            let state = OverlayState::new(Rect::new(0, 0, 320, 240), desktop(320, 240)).unwrap();
+            let output = FrozenDesktop::new(&desktop(320, 240)).unwrap();
+            present(output.dc, &state);
+        };
+        cycle();
+        let count = || unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
+        let before = count();
+        for _ in 0..100 {
+            cycle();
+        }
+        assert_eq!(count(), before, "overlay DCs or bitmaps leaked");
     }
 
     #[test]
