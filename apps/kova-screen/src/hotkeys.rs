@@ -93,9 +93,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn concurrent_replacements_keep_home_registered() {
+    fn concurrent_replacements_keep_the_binding_registered() {
+        // An obscure combination: the property under test is the replacement
+        // serialisation, not the binding, and a bare key like Home is regularly
+        // taken by other software on a developer machine.
+        let binding_text = "Ctrl+Alt+Shift+F3";
         let mut settings = kova_screen_core::settings::Settings::default();
-        settings.hotkeys.region_screenshot = "Home".into();
+        settings.hotkeys.region_screenshot = binding_text.into();
         let state = AppState::for_test(settings);
         std::thread::scope(|scope| {
             for _ in 0..4 {
@@ -111,18 +115,18 @@ mod tests {
             !state
                 .hotkey_failures()
                 .iter()
-                .any(|failure| failure.binding == "Home")
+                .any(|failure| failure.binding == binding_text)
         );
-        let binding = vec![("probe".into(), "Home".into())];
+        let binding = vec![("probe".into(), binding_text.into())];
         let (probe, failures) = kova_platform::HotkeyManager::start(&binding, |_| {}).unwrap();
         assert!(
             failures.iter().any(|failure| failure.taken_by_another_app),
-            "Home lost its registration"
+            "{binding_text} lost its registration"
         );
         drop(probe);
         shutdown();
         let (probe, failures) = kova_platform::HotkeyManager::start(&binding, |_| {}).unwrap();
-        assert!(failures.is_empty(), "Home was not released");
+        assert!(failures.is_empty(), "{binding_text} was not released");
         drop(probe);
     }
 
