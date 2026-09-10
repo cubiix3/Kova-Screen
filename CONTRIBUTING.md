@@ -24,8 +24,12 @@ of scope; please open an issue before building anything in that direction.
 - [Node.js](https://nodejs.org) 20 or newer
 - MSVC build tools (Visual Studio, *Desktop development with C++*)
 
-```bash
+Run cargo from a Developer PowerShell, or use `scripts/cargo-msvc.ps1` to
+discover the installed Visual Studio environment:
+
+```powershell
 cd ui && npm ci && cd ..
+.\scripts\cargo-msvc.ps1 check --workspace
 npx @tauri-apps/cli@2 dev --config apps/kova-screen/tauri.conf.json
 ```
 
