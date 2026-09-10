@@ -8,8 +8,8 @@ use std::path::Path;
 
 use kova_screen_core::{Error, Result};
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ, RegCloseKey, RegDeleteValueW,
-    RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
+    RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 use windows_core::HSTRING;
 
@@ -39,6 +39,39 @@ impl RegKey {
             .map_err(|e| Error::Platform(format!("could not open the autostart key: {e}")))?;
         Ok(Self(key))
     }
+
+    /// Opens the `Run` key, creating it when the profile does not have one.
+    ///
+    /// Windows always ships the `Run` key, but cleanup tools and stripped
+    /// profiles can remove it; a user asked for autostart should still get it.
+    fn create(access: windows::Win32::System::Registry::REG_SAM_FLAGS) -> Result<Self> {
+        let subkey = HSTRING::from(RUN_KEY);
+        let mut key = HKEY::default();
+        // SAFETY: `subkey` outlives the call; `key` is a live out-parameter and
+        // the class parameter is unused for a key with no default class.
+        let status = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                &subkey,
+                Some(0),
+                None,
+                REG_OPTION_NON_VOLATILE,
+                access,
+                None,
+                &mut key,
+                None,
+            )
+        };
+        status
+            .ok()
+            .map_err(|e| Error::Platform(format!("could not open the autostart key: {e}")))?;
+        Ok(Self(key))
+    }
+
+    /// Whether the `Run` key exists at all.
+    fn exists() -> bool {
+        RegKey::open(windows::Win32::System::Registry::KEY_QUERY_VALUE).is_ok()
+    }
 }
 
 impl Drop for RegKey {
@@ -66,7 +99,7 @@ fn enable(exe: &Path) -> Result<()> {
         ));
     }
 
-    let key = RegKey::open(KEY_WRITE)?;
+    let key = RegKey::create(KEY_WRITE)?;
     let name = HSTRING::from(VALUE_NAME);
 
     // `--minimized` so a sign-in launch goes straight to the tray rather than
@@ -89,6 +122,11 @@ fn enable(exe: &Path) -> Result<()> {
 }
 
 fn disable() -> Result<()> {
+    // A profile without a `Run` key has nothing to unregister, which is the
+    // desired end state rather than an error.
+    if !RegKey::exists() {
+        return Ok(());
+    }
     let key = RegKey::open(KEY_WRITE)?;
     let name = HSTRING::from(VALUE_NAME);
     // SAFETY: `name` outlives the call.
