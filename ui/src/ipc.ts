@@ -27,6 +27,7 @@ export interface CaptureSettings {
   format: ImageFormat;
   quality: number;
   copy_to_clipboard: boolean;
+  copy_file_to_clipboard: boolean;
   include_cursor: boolean;
   delay_ms: number;
   play_sound: boolean;

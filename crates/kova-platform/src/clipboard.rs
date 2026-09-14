@@ -13,6 +13,9 @@
 //! - The registered `PNG` format is what Chrome, Firefox, Discord and Slack
 //!   prefer, and it is the only one where transparency survives reliably.
 //!
+//! A capture can carry `CF_HDROP` as well, so it can be pasted where a file is
+//! expected instead of a bitmap. That is opt-in; see [`set_image_with_file`].
+//!
 //! # Why the retries
 //!
 //! `OpenClipboard` fails while another process holds the clipboard open, which
@@ -151,7 +154,22 @@ impl Drop for GlobalBlock {
 /// `png` is the already-encoded PNG for the same bitmap; the caller has usually
 /// encoded one anyway to write the file, so this avoids a second compression.
 pub fn set_image(bitmap: &Bitmap, png: &[u8]) -> Result<()> {
+    set_image_with_file(bitmap, png, None)
+}
+
+/// Places an image on the clipboard, optionally alongside the file it was saved
+/// to.
+///
+/// Adding `CF_HDROP` also serves consumers that accept file drops, such as
+/// Explorer. DIBv5 and PNG remain available. The receiving app chooses which
+/// format to use; some may insert an attachment instead of an inline image.
+/// This does not make arbitrary terminals accept images.
+pub fn set_image_with_file(bitmap: &Bitmap, png: &[u8], file: Option<&Path>) -> Result<()> {
     let dib = build_dibv5(bitmap)?;
+    // Built before the clipboard is opened: every other application on the
+    // desktop blocks while we hold it.
+    let hdrop = file.map(build_hdrop).transpose()?;
+
     let _guard = ClipboardGuard::open()?;
 
     // SAFETY: the clipboard is open; this clears the previous owner data.
@@ -164,6 +182,10 @@ pub fn set_image(bitmap: &Bitmap, png: &[u8]) -> Result<()> {
     if !png.is_empty() {
         let png_format = register_format("PNG")?;
         GlobalBlock::build(png.len(), |dest| dest.copy_from_slice(png))?.commit(png_format)?;
+    }
+
+    if let Some(hdrop) = hdrop {
+        GlobalBlock::build(hdrop.len(), |dest| dest.copy_from_slice(&hdrop))?.commit(CF_HDROP)?;
     }
 
     Ok(())
@@ -189,46 +211,50 @@ pub fn set_text(text: &str) -> Result<()> {
 }
 
 /// Places a file on the clipboard so it can be pasted into Explorer or an email.
-///
-/// `CF_HDROP` is a [`DROPFILES`] header followed by a double-NUL-terminated list
-/// of wide paths.
 pub fn set_file(path: &Path) -> Result<()> {
-    let wide: Vec<u16> = HSTRING::from(path.as_os_str()).to_vec();
-    if wide.is_empty() {
-        return Err(Error::Clipboard("cannot copy an empty path".into()));
-    }
-
-    let header = size_of::<DROPFILES>();
-    // The list is NUL-terminated, and the list itself is terminated by a
-    // second NUL: hence two extra u16 beyond the path.
-    let list_bytes = (wide.len() + 2) * 2;
-    let total = header + list_bytes;
+    let hdrop = build_hdrop(path)?;
 
     let _guard = ClipboardGuard::open()?;
     // SAFETY: the clipboard is open.
     unsafe { EmptyClipboard() }
         .map_err(|e| Error::Clipboard(format!("could not clear the clipboard: {e}")))?;
 
-    GlobalBlock::build(total, |dest| {
-        let drop_files = DROPFILES {
-            pFiles: header as u32,
-            pt: windows::Win32::Foundation::POINT { x: 0, y: 0 },
-            fNC: false.into(),
-            fWide: true.into(),
-        };
-        // SAFETY: DROPFILES is a plain C struct with no padding invariants.
-        let header_bytes = unsafe {
-            std::slice::from_raw_parts(std::ptr::from_ref(&drop_files).cast::<u8>(), header)
-        };
-        dest[..header].copy_from_slice(header_bytes);
+    GlobalBlock::build(hdrop.len(), |dest| dest.copy_from_slice(&hdrop))?.commit(CF_HDROP)
+}
 
-        for (i, unit) in wide.iter().enumerate() {
-            let at = header + i * 2;
-            dest[at..at + 2].copy_from_slice(&unit.to_le_bytes());
-        }
-        // The remaining bytes are already zero, which supplies both terminators.
-    })?
-    .commit(CF_HDROP)
+/// Builds a `CF_HDROP` payload: a [`DROPFILES`] header followed by a
+/// double-NUL-terminated list of wide paths.
+fn build_hdrop(path: &Path) -> Result<Vec<u8>> {
+    let wide: Vec<u16> = HSTRING::from(path.as_os_str()).to_vec();
+    if wide.is_empty() {
+        return Err(Error::Clipboard("cannot copy an empty path".into()));
+    }
+
+    if wide.contains(&0) {
+        return Err(Error::Clipboard("cannot copy a path containing NUL".into()));
+    }
+    let header = size_of::<DROPFILES>();
+    // The list is NUL-terminated, and the list itself is terminated by a
+    // second NUL: hence two extra u16 beyond the path.
+    let mut out = vec![0u8; header + (wide.len() + 2) * 2];
+
+    let drop_files = DROPFILES {
+        pFiles: header as u32,
+        pt: windows::Win32::Foundation::POINT { x: 0, y: 0 },
+        fNC: false.into(),
+        fWide: true.into(),
+    };
+    // SAFETY: DROPFILES is a plain C struct with no padding invariants.
+    let header_bytes =
+        unsafe { std::slice::from_raw_parts(std::ptr::from_ref(&drop_files).cast::<u8>(), header) };
+    out[..header].copy_from_slice(header_bytes);
+
+    for (i, unit) in wide.iter().enumerate() {
+        let at = header + i * 2;
+        out[at..at + 2].copy_from_slice(&unit.to_le_bytes());
+    }
+    // The remaining bytes are already zero, which supplies both terminators.
+    Ok(out)
 }
 
 /// Registers (or looks up) a named clipboard format.
@@ -433,6 +459,39 @@ mod tests {
         set_file(&path).expect("set clipboard file");
         assert!(has_format(CF_HDROP), "no CF_HDROP on the clipboard");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn image_and_file_formats_coexist_and_are_cleared_on_next_image() {
+        let _serialised = CLIPBOARD_TEST_LOCK.lock();
+        let bmp = sample(8, 8);
+        let png = b"\x89PNG\r\n\x1a\n";
+        set_image_with_file(&bmp, png, Some(Path::new(r"C:\capture.png"))).unwrap();
+        assert!(has_format(CF_HDROP));
+        assert!(has_format(CF_DIBV5));
+        assert!(has_format(register_format("PNG").unwrap()));
+        set_image(&bmp, png).unwrap();
+        assert!(!has_format(CF_HDROP));
+        assert!(has_format(CF_DIBV5));
+    }
+
+    #[test]
+    fn hdrop_preserves_unicode_path_and_double_terminator() {
+        let path = Path::new(r"C:\Screenshots\Gr??e ??.png");
+        let bytes = build_hdrop(path).unwrap();
+        let offset = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+        assert_eq!(offset, size_of::<DROPFILES>());
+        assert_eq!(u32::from_le_bytes(bytes[16..20].try_into().unwrap()), 1);
+        let units: Vec<u16> = bytes[offset..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|v| u16::from_le_bytes([v[0], v[1]]))
+            .collect();
+        let mut expected = HSTRING::from(path.as_os_str()).to_vec();
+        expected.extend([0, 0]);
+        assert_eq!(units, expected);
+        assert!(build_hdrop(Path::new("bad\0path")).is_err());
     }
 
     #[test]

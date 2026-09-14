@@ -49,6 +49,13 @@ Everything listed here is implemented and covered by tests.
   template and no collisions.
 - Copied to the clipboard as DIBv5 and PNG, so it pastes into Paint, Word,
   Chrome, Discord and Slack alike.
+- **Settings ? Capture ? Also copy the screenshot file** additionally offers
+  the saved file to apps that accept file drops. This is off by default and
+  requires **Copy to clipboard**. Some apps may paste an attachment instead of
+  an inline image. If saving fails, only the image is copied.
+- In **Claude Code on Windows**, use **Alt+V** to paste an image (see the
+  [Claude Code keyboard shortcuts](https://code.claude.com/docs/en/interactive-mode)).
+  Ordinary terminal text paste does not necessarily accept images or file drops.
 - Optionally uploaded to [vgy.me](https://vgy.me), with the resulting link
   copied to the clipboard.
 - Recorded in a small **Recent Captures** list with open, reveal, copy, upload

@@ -100,6 +100,8 @@ pub struct CaptureSettings {
     /// Quality for the lossy formats, 1-100. Ignored for PNG.
     pub quality: u8,
     pub copy_to_clipboard: bool,
+    /// Also offer the saved screenshot as a file when copying the image.
+    pub copy_file_to_clipboard: bool,
     pub include_cursor: bool,
     /// Delay before the shutter fires, in milliseconds. 0 disables it.
     pub delay_ms: u32,
@@ -113,6 +115,7 @@ impl Default for CaptureSettings {
             format: ImageFormat::Png,
             quality: 90,
             copy_to_clipboard: true,
+            copy_file_to_clipboard: false,
             include_cursor: false,
             delay_ms: 0,
             play_sound: false,
@@ -403,6 +406,21 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clipboard_file_option_is_opt_in_and_persists() {
+        let old: super::Settings =
+            serde_json::from_str(r#"{"capture":{"copy_to_clipboard":true}}"#).unwrap();
+        assert!(old.capture.copy_to_clipboard);
+        assert!(!old.capture.copy_file_to_clipboard);
+        let mut enabled = old;
+        enabled.capture.copy_file_to_clipboard = true;
+        let json = serde_json::to_string(&enabled).unwrap();
+        assert_eq!(
+            serde_json::from_str::<super::Settings>(&json).unwrap(),
+            enabled
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -7,6 +7,21 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-14
+
+### Added
+
+- Optionally copy a saved screenshot as a file alongside the image clipboard
+  formats, so Explorer and apps that accept file drops can receive it.
+- Document Claude Code's `Alt+V` image-paste shortcut on Windows.
+
+### Fixed
+
+- Keep file clipboard data opt-in and omit it when saving fails or image
+  clipboard copying is disabled.
+- Validate file-drop paths before opening the clipboard and preserve Unicode
+  paths with the required double terminator.
+
 ## [0.1.2] - 2026-09-10
 
 ### Fixed
@@ -101,7 +116,8 @@ First release.
 - HDR displays are captured in SDR
 - Window capture uses the foreground window rather than offering a picker
 
-[Unreleased]: https://github.com/cubiix3/Kova-Screen/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/cubiix3/Kova-Screen/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/cubiix3/Kova-Screen/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/cubiix3/Kova-Screen/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/cubiix3/Kova-Screen/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cubiix3/Kova-Screen/releases/tag/v0.1.0

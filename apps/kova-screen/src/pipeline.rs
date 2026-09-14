@@ -157,7 +157,14 @@ fn finish_still(
         } else {
             encode_still(&bitmap, ImageFormat::Png, 100).unwrap_or_default()
         };
-        match kova_platform::clipboard::set_image(&bitmap, &png) {
+        // Only advertise a file after saving succeeded. A failed save still
+        // leaves the image available on the clipboard.
+        let file = if settings.capture.copy_file_to_clipboard {
+            outcome.path.as_deref()
+        } else {
+            None
+        };
+        match kova_platform::clipboard::set_image_with_file(&bitmap, &png, file) {
             Ok(()) => outcome.copied = true,
             Err(err) => outcome
                 .warnings
@@ -479,6 +486,50 @@ mod tests {
         let request = upload_request(&settings, PathBuf::from("a.png"), MediaKind::Screenshot);
         assert_eq!(request.max_bytes, 8 * 1024 * 1024);
         assert_eq!(request.kind, MediaKind::Screenshot);
+    }
+
+    #[test]
+    fn file_clipboard_option_follows_save_success_and_copy_switch() {
+        use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
+
+        let dir = temp_dir("clipboard-file-option");
+        let mut settings = settings_in(&dir);
+        settings.capture.copy_file_to_clipboard = true;
+        let bitmap =
+            || Bitmap::from_raw(2, 2, PixelFormat::Bgra8, [10, 20, 30, 255].repeat(4)).unwrap();
+        let has_file = || {
+            // SAFETY: querying a format does not require opening the clipboard.
+            unsafe { IsClipboardFormatAvailable(15).is_ok() }
+        };
+        let run = |settings: &Settings| {
+            let state = AppState::for_test(settings.clone());
+            finish_still(&state, settings, bitmap()).unwrap()
+        };
+
+        let saved = run(&settings);
+        assert!(saved.path.unwrap().is_file());
+        assert!(saved.copied);
+        assert!(has_file());
+
+        settings.capture.copy_file_to_clipboard = false;
+        assert!(run(&settings).copied);
+        assert!(!has_file());
+
+        settings.capture.copy_file_to_clipboard = true;
+        let blocked = dir.join("not-a-directory");
+        std::fs::write(&blocked, b"x").unwrap();
+        settings.storage.capture_dir = Some(blocked);
+        let failed_save = run(&settings);
+        assert!(failed_save.path.is_none());
+        assert!(failed_save.copied);
+        assert!(!has_file());
+
+        settings.storage.capture_dir = Some(dir);
+        settings.capture.copy_to_clipboard = false;
+        let disabled = run(&settings);
+        assert!(disabled.path.is_some());
+        assert!(!disabled.copied);
+        assert!(!has_file());
     }
 
     #[test]
