@@ -26,22 +26,26 @@
 //! which makes a drag that crosses a monitor boundary work with no extra code.
 
 use kova_screen_core::{Bitmap, Error, PixelFormat, Point, Rect, Result};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_OVER, AlphaBlend, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, BeginPaint,
     CreateCompatibleDC, CreateDIBSection, CreatePen, CreateSolidBrush, DIB_RGB_COLORS, DT_CENTER,
-    DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, HBRUSH, HDC,
-    HGDIOBJ, InvalidateRect, PAINTSTRUCT, PS_SOLID, Rectangle, SRCCOPY, SelectObject, SetBkMode,
-    SetTextColor, TRANSPARENT,
+    DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC,
+    HBRUSH, HDC, HGDIOBJ, InvalidateRect, PAINTSTRUCT, PS_SOLID, Rectangle, ReleaseDC, SRCCOPY,
+    SelectObject, SetBkMode, SetTextColor, StretchBlt, TRANSPARENT,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, ReleaseCapture, SetCapture, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT,
+    VK_SHIFT, VK_SPACE, VK_UP,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, HCURSOR, IDC_CROSS, LoadCursorW, MSG,
-    PostQuitMessage, SW_SHOW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TranslateMessage,
-    WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
-    WM_PAINT, WM_RBUTTONDOWN, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    GWLP_USERDATA, GetCursorPos, GetMessageW, GetWindowLongPtrW, HCURSOR, IDC_CROSS, KillTimer,
+    LWA_ALPHA, LoadCursorW, MSG, PostQuitMessage, SW_SHOW, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetTimer, SetWindowDisplayAffinity, SetWindowLongPtrW, ShowWindow,
+    TranslateMessage, WDA_EXCLUDEFROMCAPTURE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_RBUTTONDOWN, WM_TIMER,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows_core::{HSTRING, PCWSTR};
 
@@ -57,6 +61,42 @@ pub struct Selection {
     /// Returned alongside the rectangle so the caller never has to re-capture,
     /// which would risk grabbing a different frame than the one selected.
     pub bitmap: Bitmap,
+}
+
+/// What a still-capture overlay picked.
+///
+/// A drag and "this display" both return the frozen pixels. A click returns
+/// the window so the caller can capture it with Windows Graphics Capture,
+/// which stays correct when other windows cover it.
+#[derive(Debug, Clone)]
+pub enum StillPick {
+    Pixels(Selection),
+    Window(kova_capture::window::WindowId),
+}
+
+/// What a recording overlay picked. There is no frozen frame: recording
+/// captures live pixels afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordPick {
+    Region(Rect),
+    Window(kova_capture::window::WindowId),
+    Monitor(kova_capture::monitor::MonitorId),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PickOutcome {
+    Region(Rect),
+    Window(kova_capture::window::WindowId),
+    Monitor(kova_capture::monitor::MonitorId),
+}
+
+struct OverlayRequest {
+    include_cursor: bool,
+    last_region: Option<Rect>,
+    /// Skip the full-desktop snapshot. The desktop shows through a dim layer.
+    live: bool,
+    countdown_secs: u32,
+    magnifier: bool,
 }
 
 /// Colours, taken from the shared Kova palette.
@@ -88,51 +128,119 @@ const READOUT_W: i32 = 116;
 /// spawn a thread for it rather than blocking the UI thread, which would freeze
 /// the tray while the overlay is up.
 pub fn select() -> Result<Option<Selection>> {
-    select_with_cursor(false)
+    match select_with_cursor(false, None)? {
+        Some(StillPick::Pixels(selection)) => Ok(Some(selection)),
+        _ => Ok(None),
+    }
 }
 
 /// Captures the pointer with the frozen desktop, before selection changes it.
-pub fn select_with_cursor(include_cursor: bool) -> Result<Option<Selection>> {
-    let Some((rect, desktop, origin)) = show_overlay(include_cursor)? else {
+///
+/// `last_region` is offered again when the user presses Space.
+pub fn select_with_cursor(
+    include_cursor: bool,
+    last_region: Option<Rect>,
+) -> Result<Option<StillPick>> {
+    let Some((outcome, desktop, origin)) = show_overlay(OverlayRequest {
+        include_cursor,
+        last_region,
+        live: false,
+        countdown_secs: 0,
+        magnifier: true,
+    })?
+    else {
         return Ok(None);
     };
-    let bitmap = desktop.crop(rect.to_local(origin))?;
-    Ok(Some(Selection { rect, bitmap }))
+    match outcome {
+        PickOutcome::Window(id) => Ok(Some(StillPick::Window(id))),
+        PickOutcome::Region(rect) => Ok(Some(StillPick::Pixels(crop_selection(
+            desktop, origin, rect,
+        )?))),
+        PickOutcome::Monitor(id) => {
+            let monitor = kova_capture::monitor::find(id)
+                .ok_or_else(|| Error::Capture("that display is no longer connected".into()))?;
+            Ok(Some(StillPick::Pixels(crop_selection(
+                desktop,
+                origin,
+                monitor.bounds,
+            )?)))
+        }
+    }
 }
 
-/// Shows the overlay and returns only the chosen rectangle.
+/// Picks a recording target without snapshotting the whole desktop.
 ///
-/// Used to pick a recording area, where the frozen still is not wanted: a
-/// recording captures live frames afterwards, so cropping the frozen desktop
-/// would only cost a pointless copy of a potentially very large bitmap.
-pub fn select_rect() -> Result<Option<Rect>> {
-    Ok(show_overlay(false)?.map(|(rect, _, _)| rect))
+/// Drag a region, click a window, press Enter for the display under the
+/// pointer, or press Space to reuse `last_region`. `countdown_secs` holds the
+/// overlay on a number before it accepts a selection.
+pub fn select_recording(
+    last_region: Option<Rect>,
+    countdown_secs: u32,
+) -> Result<Option<RecordPick>> {
+    let Some((outcome, _, _)) = show_overlay(OverlayRequest {
+        include_cursor: false,
+        last_region,
+        live: true,
+        countdown_secs,
+        magnifier: true,
+    })?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(match outcome {
+        PickOutcome::Region(rect) => RecordPick::Region(rect),
+        PickOutcome::Window(id) => RecordPick::Window(id),
+        PickOutcome::Monitor(id) => RecordPick::Monitor(id),
+    }))
 }
 
-/// Runs the overlay, returning the selection, the frozen desktop it was drawn
-/// from, and that bitmap origin on the virtual desktop.
-fn show_overlay(include_cursor: bool) -> Result<Option<(Rect, Bitmap, Point)>> {
+fn crop_selection(desktop: Bitmap, origin: Point, rect: Rect) -> Result<Selection> {
+    let bitmap = desktop.crop(rect.to_local(origin))?;
+    Ok(Selection { rect, bitmap })
+}
+
+/// Runs the overlay and returns the pick, the desktop bitmap it was drawn
+/// from (a 1×1 placeholder in live mode), and that bitmap's origin.
+fn show_overlay(request: OverlayRequest) -> Result<Option<(PickOutcome, Bitmap, Point)>> {
     let desktop_rect = kova_capture::monitor::virtual_desktop_bounds()?;
     // Capture first, then show the window, so the overlay itself can never
-    // appear in the frozen frame.
-    let mut desktop = kova_capture::gdi::capture_rect(desktop_rect)?;
-    if include_cursor && let Err(err) = kova_capture::cursor::draw_into(&mut desktop, desktop_rect)
-    {
-        tracing::warn!(%err, "could not include cursor in region capture");
-    }
+    // appear in the frozen frame. Live mode skips that snapshot: a recording
+    // only needs the rectangle, and copying every monitor first is the slow part.
+    let desktop = if request.live {
+        Bitmap::new_zeroed(1, 1, PixelFormat::Bgra8)?
+    } else {
+        let mut desktop = kova_capture::gdi::capture_rect(desktop_rect)?;
+        if request.include_cursor
+            && let Err(err) = kova_capture::cursor::draw_into(&mut desktop, desktop_rect)
+        {
+            tracing::warn!(%err, "could not include cursor in region capture");
+        }
+        desktop
+    };
 
     let mut state = Box::new(OverlayState::new(desktop_rect, desktop)?);
+    state.last_region = request.last_region;
+    state.live = request.live;
+    state.magnifier = request.magnifier;
+    state.countdown_left = request.countdown_secs;
+    if let Some(cursor) = cursor_pos() {
+        state.cursor = Point::new(cursor.x - desktop_rect.x, cursor.y - desktop_rect.y);
+    }
     let state_ptr = std::ptr::from_mut(state.as_mut());
 
     let class = register_class()?;
     let module = ModuleHandle::current()?;
+    let mut ex_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+    if request.live {
+        ex_style |= WS_EX_LAYERED;
+    }
 
     // SAFETY: the class is registered, and `state_ptr` outlives the window
     // because `state` is dropped only after the message loop returns.
     let hwnd = unsafe {
         CreateWindowExW(
             // TOOLWINDOW keeps it out of the taskbar and Alt+Tab.
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            ex_style,
             PCWSTR(class.as_ptr()),
             PCWSTR(HSTRING::from("Kova Screen").as_ptr()),
             WS_POPUP,
@@ -148,8 +256,17 @@ fn show_overlay(include_cursor: bool) -> Result<Option<(Rect, Bitmap, Point)>> {
     }
     .map_err(|e| Error::Platform(format!("could not create the capture overlay: {e}")))?;
 
-    // SAFETY: `hwnd` is live.
+    // SAFETY: `hwnd` is live. The live window is uniformly translucent so the
+    // desktop shows through, and excluded from capture so the magnifier's
+    // screen sample does not contain the overlay itself.
     unsafe {
+        if request.live {
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 160, LWA_ALPHA);
+            let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        }
+        if request.countdown_secs > 0 && SetTimer(Some(hwnd), 1, 1000, None) == 0 {
+            state.countdown_left = 0;
+        }
         let _ = ShowWindow(hwnd, SW_SHOW);
     }
     take_foreground(hwnd);
@@ -162,9 +279,9 @@ fn show_overlay(include_cursor: bool) -> Result<Option<(Rect, Bitmap, Point)>> {
         let _ = DestroyWindow(hwnd);
     }
 
-    match state.result.take() {
-        Some(rect) => Ok(Some((
-            rect,
+    match state.outcome.take() {
+        Some(outcome) => Ok(Some((
+            outcome,
             std::mem::replace(
                 &mut state.desktop,
                 Bitmap::new_zeroed(1, 1, PixelFormat::Bgra8)?,
@@ -173,6 +290,13 @@ fn show_overlay(include_cursor: bool) -> Result<Option<(Rect, Bitmap, Point)>> {
         ))),
         None => Ok(None),
     }
+}
+
+fn cursor_pos() -> Option<Point> {
+    let mut pt = POINT::default();
+    // SAFETY: `pt` is a live local.
+    unsafe { GetCursorPos(&mut pt) }.ok()?;
+    Some(Point::new(pt.x, pt.y))
 }
 
 /// Brings the overlay to the foreground and gives it keyboard focus.
@@ -251,6 +375,8 @@ struct OverlayState {
     /// Origin and extent of the virtual desktop, so window-local coordinates
     /// can be converted back to desktop coordinates.
     origin: Point,
+    viewport_w: i32,
+    viewport_h: i32,
     desktop: Bitmap,
     /// The frozen desktop as a GDI bitmap, ready to blit.
     frozen: FrozenDesktop,
@@ -259,7 +385,15 @@ struct OverlayState {
     anchor: Option<Point>,
     cursor: Point,
     dragging: bool,
-    result: Option<Rect>,
+    outcome: Option<PickOutcome>,
+    last_region: Option<Rect>,
+    /// Desktop shows through; no frozen snapshot.
+    live: bool,
+    magnifier: bool,
+    /// Seconds remaining before a selection is accepted. Zero means open.
+    countdown_left: u32,
+    /// Window under the pointer, in window-local coordinates.
+    hover: Option<Rect>,
 }
 
 impl OverlayState {
@@ -268,13 +402,20 @@ impl OverlayState {
         let back_buffer = FrozenDesktop::new(&desktop)?;
         Ok(Self {
             origin: Point::new(rect.x, rect.y),
+            viewport_w: rect.width as i32,
+            viewport_h: rect.height as i32,
             desktop,
             frozen,
             back_buffer,
             anchor: None,
             cursor: Point::new(0, 0),
             dragging: false,
-            result: None,
+            outcome: None,
+            last_region: None,
+            live: false,
+            magnifier: false,
+            countdown_left: 0,
+            hover: None,
         })
     }
 
@@ -436,11 +577,25 @@ unsafe extern "system" fn window_proc(
             paint(hwnd, state);
             LRESULT(0)
         }
-        WM_LBUTTONDOWN => {
+        WM_TIMER => {
+            if state.countdown_left > 0 {
+                state.countdown_left -= 1;
+            }
+            if state.countdown_left == 0 {
+                // SAFETY: `hwnd` is live.
+                unsafe {
+                    let _ = KillTimer(Some(hwnd), 1);
+                }
+            }
+            invalidate(hwnd);
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN if state.countdown_left == 0 => {
             let point = point_from_lparam(lparam);
             state.anchor = Some(point);
             state.cursor = point;
             state.dragging = true;
+            state.hover = None;
             // Capture keeps receiving moves if the pointer leaves the window,
             // which happens at the very edge of the virtual desktop.
             // SAFETY: `hwnd` is live.
@@ -450,12 +605,17 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
-            if state.dragging {
-                state.cursor = point_from_lparam(lparam);
-                // SAFETY: `hwnd` is live; a null rect invalidates the whole window.
-                unsafe {
-                    let _ = InvalidateRect(Some(hwnd), None, false);
-                }
+            state.cursor = point_from_lparam(lparam);
+            if !state.dragging && state.countdown_left == 0 {
+                let desktop = Point::new(
+                    state.cursor.x + state.origin.x,
+                    state.cursor.y + state.origin.y,
+                );
+                state.hover = kova_capture::window::from_point(desktop)
+                    .map(|window| window.bounds.to_local(state.origin));
+            }
+            if state.dragging || state.magnifier || state.live || state.hover.is_some() {
+                invalidate(hwnd);
             }
             LRESULT(0)
         }
@@ -467,31 +627,18 @@ unsafe extern "system" fn window_proc(
                 unsafe {
                     let _ = ReleaseCapture();
                 }
-
-                match state.selection() {
-                    // A stray click, not a drag: treat as a cancel.
-                    Some(rect) if rect.width >= MIN_SELECTION && rect.height >= MIN_SELECTION => {
-                        state.result = Some(Rect::new(
-                            rect.x + state.origin.x,
-                            rect.y + state.origin.y,
-                            rect.width,
-                            rect.height,
-                        ));
-                    }
-                    _ => state.result = None,
-                }
+                state.outcome = classify_release(state.selection(), state.origin, state.cursor);
                 finish(hwnd);
             }
             LRESULT(0)
         }
-        WM_KEYDOWN if wparam.0 as u16 == VK_ESCAPE.0 => {
-            state.result = None;
-            finish(hwnd);
+        WM_KEYDOWN => {
+            handle_key(hwnd, state, wparam.0 as u16);
             LRESULT(0)
         }
         // Right-click is the other conventional cancel.
         WM_RBUTTONDOWN => {
-            state.result = None;
+            state.outcome = None;
             finish(hwnd);
             LRESULT(0)
         }
@@ -505,6 +652,98 @@ unsafe extern "system" fn window_proc(
         // SAFETY: everything else gets default handling.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
+}
+
+fn invalidate(hwnd: HWND) {
+    // SAFETY: `hwnd` is live; a null rect invalidates the whole window.
+    unsafe {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+}
+
+/// A drag that clears the minimum becomes a region. Anything smaller is a
+/// click on the window under the pointer, or a cancel when there is none.
+fn classify_release(selection: Option<Rect>, origin: Point, cursor: Point) -> Option<PickOutcome> {
+    if let Some(rect) = selection
+        && rect.width >= MIN_SELECTION
+        && rect.height >= MIN_SELECTION
+    {
+        return Some(PickOutcome::Region(Rect::new(
+            rect.x + origin.x,
+            rect.y + origin.y,
+            rect.width,
+            rect.height,
+        )));
+    }
+    let desktop = Point::new(cursor.x + origin.x, cursor.y + origin.y);
+    kova_capture::window::from_point(desktop).map(|window| PickOutcome::Window(window.id))
+}
+
+fn handle_key(hwnd: HWND, state: &mut OverlayState, key: u16) {
+    if key == VK_ESCAPE.0 {
+        state.outcome = None;
+        finish(hwnd);
+        return;
+    }
+    if state.countdown_left > 0 {
+        return;
+    }
+    if key == VK_SPACE.0 {
+        if let Some(rect) = state.last_region.filter(|rect| !rect.is_empty()) {
+            state.outcome = Some(PickOutcome::Region(rect));
+            finish(hwnd);
+        }
+        return;
+    }
+    if key == VK_RETURN.0 {
+        let desktop = Point::new(
+            state.cursor.x + state.origin.x,
+            state.cursor.y + state.origin.y,
+        );
+        if let Some(monitor) = kova_capture::monitor::from_point(desktop) {
+            state.outcome = Some(PickOutcome::Monitor(monitor.id));
+            finish(hwnd);
+        }
+        return;
+    }
+    if state.dragging && is_arrow(key) {
+        // SAFETY: GetAsyncKeyState reads keyboard state and has no pointer inputs.
+        let fast = unsafe { GetAsyncKeyState(VK_SHIFT.0 as i32) } < 0;
+        state.cursor = nudge_point(
+            state.cursor,
+            key,
+            fast,
+            state.viewport_w.max(state.frozen.width),
+            state.viewport_h.max(state.frozen.height),
+        );
+        invalidate(hwnd);
+    }
+}
+
+fn is_arrow(key: u16) -> bool {
+    key == VK_LEFT.0 || key == VK_RIGHT.0 || key == VK_UP.0 || key == VK_DOWN.0
+}
+
+/// Moves `point` by one pixel, or ten while Shift is held, staying on screen.
+fn nudge_point(point: Point, key: u16, fast: bool, width: i32, height: i32) -> Point {
+    let step = if fast { 10 } else { 1 };
+    let (dx, dy) = if key == VK_LEFT.0 {
+        (-step, 0)
+    } else if key == VK_RIGHT.0 {
+        (step, 0)
+    } else if key == VK_UP.0 {
+        (0, -step)
+    } else if key == VK_DOWN.0 {
+        (0, step)
+    } else {
+        (0, 0)
+    };
+    let max_x = width.saturating_sub(1).max(0);
+    let max_y = height.saturating_sub(1).max(0);
+    Point::new(
+        (point.x + dx).clamp(0, max_x),
+        (point.y + dy).clamp(0, max_y),
+    )
 }
 
 fn finish(hwnd: HWND) {
@@ -527,7 +766,11 @@ fn paint(hwnd: HWND, state: &OverlayState) {
     // SAFETY: `ps` is a live local; BeginPaint is balanced by EndPaint below.
     let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
     if !hdc.is_invalid() {
-        present(hdc, state);
+        if state.live {
+            paint_live(hdc, state);
+        } else {
+            present(hdc, state);
+        }
     }
 
     // SAFETY: balances BeginPaint.
@@ -637,6 +880,186 @@ fn draw(hdc: HDC, state: &OverlayState) {
     if let Some(sel) = selection {
         stroke_selection(hdc, sel);
         draw_readout(hdc, sel, w, h);
+    } else if let Some(hover) = state.hover {
+        stroke_selection(hdc, hover);
+    }
+
+    if state.magnifier && selection.is_none() {
+        draw_hint(hdc, w, 8);
+    }
+    if state.magnifier {
+        draw_magnifier_from_dc(hdc, state.frozen.dc, state.cursor, 0, 0, w, h);
+    }
+}
+
+/// Live picker: a translucent full-screen window, no desktop-sized bitmap.
+fn paint_live(hdc: HDC, state: &OverlayState) {
+    let (w, h) = (state.viewport_w, state.viewport_h);
+    // SAFETY: the brush is deleted before returning.
+    unsafe {
+        let brush = CreateSolidBrush(COLORREF(0x0000_0000));
+        FillRect(
+            hdc,
+            &RECT {
+                left: 0,
+                top: 0,
+                right: w,
+                bottom: h,
+            },
+            brush,
+        );
+        let _ = DeleteObject(HGDIOBJ(brush.0));
+    }
+
+    if state.countdown_left > 0 {
+        draw_countdown(hdc, w, h, state.countdown_left);
+        return;
+    }
+
+    if let Some(sel) = state.selection() {
+        stroke_selection(hdc, sel);
+        draw_readout(hdc, sel, w, h);
+    } else if let Some(hover) = state.hover {
+        stroke_selection(hdc, hover);
+        draw_readout(hdc, hover, w, h);
+    } else {
+        draw_hint(hdc, w, 24);
+    }
+
+    if state.magnifier {
+        draw_magnifier_from_screen(hdc, state);
+    }
+}
+
+fn draw_countdown(hdc: HDC, screen_w: i32, screen_h: i32, seconds: u32) {
+    let text = format!("{seconds}");
+    let wide: Vec<u16> = HSTRING::from(text.as_str()).to_vec();
+    let mut rect = RECT {
+        left: 0,
+        top: screen_h / 2 - 48,
+        right: screen_w,
+        bottom: screen_h / 2 + 48,
+    };
+    // SAFETY: the font is restored and deleted before returning.
+    unsafe {
+        let font = win32::ui_font(72);
+        let previous = SelectObject(hdc, HGDIOBJ(font.0));
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, COLORREF(theme::READOUT_FG));
+        let mut text_buf = wide;
+        DrawTextW(
+            hdc,
+            &mut text_buf,
+            &mut rect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
+        if !previous.is_invalid() {
+            SelectObject(hdc, previous);
+        }
+        let _ = DeleteObject(HGDIOBJ(font.0));
+    }
+}
+
+fn draw_hint(hdc: HDC, screen_w: i32, top: i32) {
+    let text = "Drag a region   ·   Click a window   ·   Enter this display   ·   Space repeats the last region";
+    let wide: Vec<u16> = HSTRING::from(text).to_vec();
+    let width = screen_w.min(760);
+    let left = ((screen_w - width) / 2).max(0);
+    let mut rect = RECT {
+        left,
+        top,
+        right: left + width,
+        bottom: top + READOUT_H,
+    };
+    // SAFETY: brush and font are released before returning.
+    unsafe {
+        let brush: HBRUSH = CreateSolidBrush(COLORREF(theme::READOUT_BG));
+        FillRect(hdc, &rect, brush);
+        let _ = DeleteObject(HGDIOBJ(brush.0));
+        let font = win32::ui_font(14);
+        let previous = SelectObject(hdc, HGDIOBJ(font.0));
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, COLORREF(theme::READOUT_FG));
+        let mut text_buf = wide;
+        DrawTextW(
+            hdc,
+            &mut text_buf,
+            &mut rect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
+        if !previous.is_invalid() {
+            SelectObject(hdc, previous);
+        }
+        let _ = DeleteObject(HGDIOBJ(font.0));
+    }
+}
+
+const MAGNIFIER: i32 = 128;
+const MAGNIFIER_SRC: i32 = 40;
+
+fn magnifier_origin(cursor: Point, screen_w: i32, screen_h: i32) -> (i32, i32) {
+    const GAP: i32 = 28;
+    let mut x = cursor.x + GAP;
+    let mut y = cursor.y + GAP;
+    if x + MAGNIFIER > screen_w {
+        x = cursor.x - GAP - MAGNIFIER;
+    }
+    if y + MAGNIFIER > screen_h {
+        y = cursor.y - GAP - MAGNIFIER;
+    }
+    (x.max(0), y.max(0))
+}
+
+/// Zooms a patch of `source`, whose origin is `(src_origin_x, src_origin_y)`
+/// in the same space as `cursor`.
+fn draw_magnifier_from_dc(
+    hdc: HDC,
+    source: HDC,
+    cursor: Point,
+    src_origin_x: i32,
+    src_origin_y: i32,
+    screen_w: i32,
+    screen_h: i32,
+) {
+    let (x, y) = magnifier_origin(cursor, screen_w, screen_h);
+    let src_x = cursor.x + src_origin_x - MAGNIFIER_SRC / 2;
+    let src_y = cursor.y + src_origin_y - MAGNIFIER_SRC / 2;
+    // SAFETY: both DCs belong to the caller and outlive this blit.
+    unsafe {
+        let _ = StretchBlt(
+            hdc,
+            x,
+            y,
+            MAGNIFIER,
+            MAGNIFIER,
+            Some(source),
+            src_x,
+            src_y,
+            MAGNIFIER_SRC,
+            MAGNIFIER_SRC,
+            SRCCOPY,
+        );
+    }
+    stroke_selection(hdc, Rect::new(x, y, MAGNIFIER as u32, MAGNIFIER as u32));
+}
+
+fn draw_magnifier_from_screen(hdc: HDC, state: &OverlayState) {
+    // SAFETY: the screen DC is released on every path below.
+    let screen = unsafe { GetDC(None) };
+    if screen.is_invalid() {
+        return;
+    }
+    draw_magnifier_from_dc(
+        hdc,
+        screen,
+        state.cursor,
+        state.origin.x,
+        state.origin.y,
+        state.viewport_w,
+        state.viewport_h,
+    );
+    unsafe {
+        ReleaseDC(None, screen);
     }
 }
 
@@ -916,6 +1339,33 @@ mod tests {
         // A 1x1 or 2x2 drag is a click, not a selection.
         let rect = Rect::from_corners(Point::new(10, 10), Point::new(11, 11));
         assert!(rect.width < MIN_SELECTION || rect.height < MIN_SELECTION);
+        let origin = Point::new(0, 0);
+        let dragged = classify_release(Some(Rect::new(4, 4, 20, 12)), origin, Point::new(4, 4));
+        assert!(matches!(dragged, Some(PickOutcome::Region(_))));
+    }
+
+    #[test]
+    fn a_drag_is_translated_into_desktop_coordinates() {
+        let origin = Point::new(-1920, 0);
+        let outcome = classify_release(Some(Rect::new(10, 20, 30, 40)), origin, Point::new(0, 0));
+        assert!(matches!(
+            outcome,
+            Some(PickOutcome::Region(rect)) if rect == Rect::new(-1910, 20, 30, 40)
+        ));
+    }
+
+    #[test]
+    fn arrow_keys_nudge_by_one_pixel_and_stay_on_screen() {
+        let start = Point::new(0, 5);
+        assert_eq!(
+            nudge_point(start, VK_LEFT.0, false, 100, 100),
+            Point::new(0, 5)
+        );
+        assert_eq!(
+            nudge_point(start, VK_RIGHT.0, true, 100, 100),
+            Point::new(10, 5)
+        );
+        assert_eq!(nudge_point(Point::new(95, 0), VK_DOWN.0, true, 100, 8).y, 7);
     }
 
     #[test]

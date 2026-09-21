@@ -168,6 +168,11 @@ pub struct RecordingSettings {
     /// Largest GIF we will write, in megabytes. The encoder drops frame rate
     /// and then stops early rather than producing a 400 MB GIF.
     pub gif_max_size_mb: u32,
+    /// Frames wider than this are scaled down before they are quantised.
+    /// 0 keeps the captured width.
+    pub gif_max_width: u32,
+    /// Seconds to count down before the recording selector appears. 0 skips it.
+    pub countdown_secs: u32,
 }
 
 impl Default for RecordingSettings {
@@ -180,6 +185,8 @@ impl Default for RecordingSettings {
             hardware_encoding: false,
             max_duration_secs: 1800,
             gif_max_size_mb: 32,
+            gif_max_width: 1280,
+            countdown_secs: 0,
         }
     }
 }
@@ -191,6 +198,8 @@ pub struct UploadSettings {
     pub enabled: bool,
     pub auto_upload_screenshots: bool,
     pub auto_upload_gifs: bool,
+    /// Kept so older settings files still load. vgy.me cannot accept MP4, so
+    /// the app does not upload recordings because of this flag.
     pub auto_upload_recordings: bool,
     pub url_kind: UrlKind,
     /// Copy the resulting URL to the clipboard, replacing the image.
@@ -247,6 +256,10 @@ pub struct HotkeySettings {
     pub record_gif: String,
     /// Stops whichever recording is running. Shares a default with nothing else.
     pub stop_recording: String,
+    /// Every connected display, as one image.
+    pub all_monitors_screenshot: String,
+    /// Captures the same rectangle as the previous region selection.
+    pub repeat_last_region: String,
 }
 
 impl Default for HotkeySettings {
@@ -258,17 +271,21 @@ impl Default for HotkeySettings {
             record_mp4: "Ctrl+Shift+R".into(),
             record_gif: "Ctrl+Shift+G".into(),
             stop_recording: "Ctrl+Shift+S".into(),
+            all_monitors_screenshot: "Ctrl+Alt+PrintScreen".into(),
+            repeat_last_region: "Alt+PrintScreen".into(),
         }
     }
 }
 
 impl HotkeySettings {
     /// All bindings paired with the action id used by the hotkey registry.
-    pub fn bindings(&self) -> [(&'static str, &str); 6] {
+    pub fn bindings(&self) -> [(&'static str, &str); 8] {
         [
             ("region_screenshot", &self.region_screenshot),
             ("fullscreen_screenshot", &self.fullscreen_screenshot),
             ("window_screenshot", &self.window_screenshot),
+            ("all_monitors_screenshot", &self.all_monitors_screenshot),
+            ("repeat_last_region", &self.repeat_last_region),
             ("record_mp4", &self.record_mp4),
             ("record_gif", &self.record_gif),
             ("stop_recording", &self.stop_recording),
@@ -396,6 +413,8 @@ impl Settings {
         self.recording.gif_fps = self.recording.gif_fps.clamp(5, 30);
         self.recording.max_duration_secs = self.recording.max_duration_secs.min(6 * 3600);
         self.recording.gif_max_size_mb = self.recording.gif_max_size_mb.clamp(1, 512);
+        self.recording.gif_max_width = self.recording.gif_max_width.min(8192);
+        self.recording.countdown_secs = self.recording.countdown_secs.min(10);
         self.upload.max_upload_mb = self.upload.max_upload_mb.clamp(1, 1024);
 
         if self.storage.filename_template.trim().is_empty() {
@@ -434,6 +453,19 @@ mod tests {
         // Upload is opt-in: a fresh install must not send anything anywhere.
         assert!(!s.upload.enabled);
         assert!(!s.upload.auto_upload_screenshots);
+        assert_eq!(s.hotkeys.bindings().len(), 8);
+        assert_eq!(s.recording.gif_max_width, 1280);
+        assert_eq!(s.recording.countdown_secs, 0);
+    }
+
+    #[test]
+    fn older_settings_files_gain_the_new_fields() {
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.hotkeys.all_monitors_screenshot, "Ctrl+Alt+PrintScreen");
+        assert_eq!(s.hotkeys.repeat_last_region, "Alt+PrintScreen");
+        assert_eq!(s.recording.gif_max_width, 1280);
+        assert_eq!(s.recording.countdown_secs, 0);
+        assert!(!s.capture.play_sound);
     }
 
     #[test]

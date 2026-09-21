@@ -179,8 +179,16 @@ pub fn get_history(state: State<'_, Arc<AppState>>, limit: Option<u32>) -> CmdRe
             .unwrap_or("History is unavailable in this session.")
             .to_string());
     };
+    let configured = state.settings().storage.history_limit;
+    // Unlimited history still has to fit in the window. Two thousand rows is
+    // the list; the database keeps whatever the setting asked for.
+    let cap = if configured == 0 {
+        2000
+    } else {
+        configured.min(2000)
+    };
     history
-        .recent(limit.unwrap_or(200).min(1000))
+        .recent(limit.unwrap_or(cap).min(2000))
         .map_err(describe)
 }
 
@@ -230,6 +238,26 @@ pub fn copy_capture_file(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<
         return Err("That file no longer exists.".into());
     }
     kova_platform::clipboard::set_file(&entry.path).map_err(describe)
+}
+
+/// Puts a saved screenshot on the clipboard as an image.
+#[tauri::command]
+pub fn copy_capture_image(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<()> {
+    let entry = entry_of(&state, id)?;
+    if entry.kind != kova_history::CaptureKind::Screenshot {
+        return Err("Copy the file for a GIF or a recording.".into());
+    }
+    if !entry.path.exists() {
+        return Err("That file no longer exists.".into());
+    }
+    let bitmap = kova_encode::still::decode_file(&entry.path).map_err(describe)?;
+    let png = kova_encode::still::encode_still(
+        &bitmap,
+        kova_screen_core::settings::ImageFormat::Png,
+        100,
+    )
+    .map_err(describe)?;
+    kova_platform::clipboard::set_image(&bitmap, &png).map_err(describe)
 }
 
 #[tauri::command]
@@ -287,7 +315,21 @@ pub fn delete_capture_file(state: State<'_, Arc<AppState>>, id: i64) -> CmdResul
     if let Some(history) = state.history() {
         history.remove(id).map_err(describe)?;
     }
+    state.notify_history_changed();
     Ok(())
+}
+
+/// Opens the project's release page. The address is fixed so this cannot be
+/// turned into a general "open any URL" command.
+#[tauri::command]
+pub fn open_releases(app: AppHandle) -> CmdResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(
+            "https://github.com/cubiix3/Kova-Screen/releases",
+            None::<&str>,
+        )
+        .map_err(|e| e.to_string())
 }
 
 /// Follows the provider deletion link to remove the online copy.
@@ -310,6 +352,7 @@ pub async fn delete_capture_upload(state: State<'_, Arc<AppState>>, id: i64) -> 
         if let Some(history) = state.history() {
             history.clear_upload(id).map_err(describe)?;
         }
+        state.notify_history_changed();
         Ok(())
     })
     .await
@@ -322,7 +365,9 @@ pub fn prune_missing(state: State<'_, Arc<AppState>>) -> CmdResult<u32> {
     let Some(history) = state.history() else {
         return Ok(0);
     };
-    history.forget_missing_files().map_err(describe)
+    let removed = history.forget_missing_files().map_err(describe)?;
+    state.notify_history_changed();
+    Ok(removed)
 }
 
 /// Sets the capture directory after checking it is usable.
@@ -357,6 +402,7 @@ pub fn run_action(
         "screenshot_fullscreen" => Action::ScreenshotFullscreen,
         "screenshot_all_monitors" => Action::ScreenshotAllMonitors,
         "screenshot_window" => Action::ScreenshotWindow,
+        "screenshot_repeat_region" => Action::RepeatLastRegion,
         "record_mp4" => Action::RecordMp4,
         "record_gif" => Action::RecordGif,
         "stop_recording" => Action::StopRecording,
@@ -364,10 +410,7 @@ pub fn run_action(
     };
 
     // Hide the window that triggered it, or it would appear in the screenshot.
-    if matches!(
-        action,
-        Action::ScreenshotRegion | Action::ScreenshotFullscreen | Action::ScreenshotAllMonitors
-    ) {
+    if !matches!(action, Action::StopRecording) {
         for label in [crate::windows::SETTINGS, crate::windows::HISTORY] {
             if let Some(window) = app.get_webview_window(label) {
                 let _ = window.hide();
@@ -401,6 +444,7 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sy
         reveal_capture,
         open_capture_folder,
         copy_capture_file,
+        copy_capture_image,
         copy_capture_path,
         copy_capture_url,
         upload_capture,
@@ -410,6 +454,7 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sy
         set_capture_dir,
         run_action,
         recording_status,
+        open_releases,
     ]
 }
 

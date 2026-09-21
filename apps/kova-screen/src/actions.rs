@@ -30,6 +30,8 @@ pub enum Action {
     ScreenshotFullscreen,
     ScreenshotAllMonitors,
     ScreenshotWindow,
+    /// The rectangle from the previous region selection, captured again.
+    RepeatLastRegion,
     RecordMp4,
     RecordGif,
     /// Stops whichever recording is running. A no-op if none is.
@@ -43,6 +45,8 @@ impl Action {
             "region_screenshot" => Action::ScreenshotRegion,
             "fullscreen_screenshot" => Action::ScreenshotFullscreen,
             "window_screenshot" => Action::ScreenshotWindow,
+            "all_monitors_screenshot" => Action::ScreenshotAllMonitors,
+            "repeat_last_region" => Action::RepeatLastRegion,
             "record_mp4" => Action::RecordMp4,
             "record_gif" => Action::RecordGif,
             "stop_recording" => Action::StopRecording,
@@ -104,6 +108,7 @@ fn run(state: &Arc<AppState>, action: Action) {
         Action::ScreenshotFullscreen => shot(state, ShotRequest::Fullscreen),
         Action::ScreenshotAllMonitors => shot(state, ShotRequest::AllMonitors),
         Action::ScreenshotWindow => shot(state, ShotRequest::ActiveWindow),
+        Action::RepeatLastRegion => repeat_last_region(state),
         Action::RecordMp4 => start_recording(state, RecordingFormat::Mp4),
         Action::RecordGif => start_recording(state, RecordingFormat::Gif),
         Action::StopRecording => {
@@ -125,18 +130,32 @@ fn shot(state: &Arc<AppState>, request: ShotRequest) -> Result<()> {
     Ok(())
 }
 
-/// Asks for a region and starts recording it.
+/// Asks what to record, then starts it.
+///
+/// The picker does not snapshot the desktop. Drag a region, click a window,
+/// or press Enter for the display under the pointer.
 pub fn start_recording(state: &Arc<AppState>, format: RecordingFormat) -> Result<()> {
-    // Both MP4 and GIF record a region: it is the only target that needs no
-    // extra picker, and it is what the product spec asks for.
-    let Some(rect) = kova_platform::overlay::region::select_rect()? else {
+    let settings = state.settings();
+    let Some(pick) = kova_platform::overlay::region::select_recording(
+        state.last_region(),
+        settings.recording.countdown_secs,
+    )?
+    else {
         return Ok(()); // Cancelled.
     };
 
-    let settings = state.settings();
+    let target = match pick {
+        kova_platform::overlay::RecordPick::Region(rect) => {
+            state.remember_region(rect);
+            RecordingTarget::Region(rect)
+        }
+        kova_platform::overlay::RecordPick::Window(id) => RecordingTarget::Window(id),
+        kova_platform::overlay::RecordPick::Monitor(id) => RecordingTarget::Monitor(id),
+    };
+
     let path = pipeline::reserve_recording_path(&settings, format.extension())?;
 
-    let handle = RecorderHandle::start(&settings, format, RecordingTarget::Region(rect), path)?;
+    let handle = RecorderHandle::start(&settings, format, target, path)?;
 
     *state.recorder().lock() = Some(handle);
     watch_recording(Arc::clone(state));
@@ -196,8 +215,8 @@ fn report_recording(state: &Arc<AppState>, format: RecordingFormat, summary: Rec
             path: summary.path.clone(),
             kind: format.capture_kind(),
             size_bytes: summary.size_bytes,
-            width: 0,
-            height: 0,
+            width: summary.width,
+            height: summary.height,
         };
         match history.insert(&entry) {
             Ok(id) => {
@@ -212,6 +231,7 @@ fn report_recording(state: &Arc<AppState>, format: RecordingFormat, summary: Rec
             }
         }
     });
+    state.notify_history_changed();
 
     if settings.upload.copy_recording_path
         && let Err(err) = kova_platform::clipboard::set_text(&summary.path.to_string_lossy())
@@ -222,9 +242,27 @@ fn report_recording(state: &Arc<AppState>, format: RecordingFormat, summary: Rec
     if summary.truncated {
         warnings.push("The GIF reached its size limit and was cut short.".into());
     }
+    if summary.clipped {
+        warnings.push(
+            "Only the part on one display was recorded. A recording cannot cross displays.".into(),
+        );
+    }
+    if summary.scaled_down {
+        warnings.push(format!(
+            "Scaled to {}×{} to stay within the GIF width limit.",
+            summary.width, summary.height
+        ));
+    }
+    if !summary.overlay_excluded {
+        warnings.push(
+            "The recording controls may appear in the video on this version of Windows.".into(),
+        );
+    }
 
+    // vgy.me accepts GIFs and stills. MP4 stays on disk; offering the upload
+    // would report a failure for a recording that already succeeded.
     let auto_upload = match format {
-        RecordingFormat::Mp4 => settings.upload.auto_upload_recordings,
+        RecordingFormat::Mp4 => false,
         RecordingFormat::Gif => settings.upload.auto_upload_gifs,
     };
     if settings.upload.enabled && auto_upload {
@@ -255,6 +293,22 @@ fn report_recording(state: &Arc<AppState>, format: RecordingFormat, summary: Rec
     }
 
     notify::show("Recording saved", &body);
+}
+
+/// Captures the previous region again, without opening the selector.
+fn repeat_last_region(state: &Arc<AppState>) -> Result<()> {
+    let Some(rect) = state.last_region() else {
+        notify::show_if_enabled(
+            &state.settings(),
+            "Kova Screen",
+            "Drag a region once. Alt+Print Screen repeats it.",
+        );
+        return Ok(());
+    };
+    let rect = kova_capture::monitor::clamp_to_desktop(rect)?;
+    let outcome = pipeline::capture_rect(state, rect)?;
+    notify::report_capture(&state.settings(), &outcome);
+    Ok(())
 }
 
 /// `mm:ss`, or `h:mm:ss` past an hour.
@@ -297,6 +351,14 @@ mod tests {
         assert_eq!(
             Action::from_hotkey_id("window_screenshot"),
             Some(Action::ScreenshotWindow)
+        );
+        assert_eq!(
+            Action::from_hotkey_id("all_monitors_screenshot"),
+            Some(Action::ScreenshotAllMonitors)
+        );
+        assert_eq!(
+            Action::from_hotkey_id("repeat_last_region"),
+            Some(Action::RepeatLastRegion)
         );
         assert_eq!(
             Action::from_hotkey_id("record_mp4"),

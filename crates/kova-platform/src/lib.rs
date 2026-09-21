@@ -13,6 +13,7 @@ pub mod clipboard;
 pub mod credentials;
 pub mod hotkeys;
 pub mod overlay;
+pub mod sound;
 mod win32;
 
 pub use hotkeys::{Hotkey, HotkeyFailure, HotkeyManager};

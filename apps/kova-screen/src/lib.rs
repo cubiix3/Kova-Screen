@@ -63,15 +63,22 @@ pub fn run() {
         }));
     }
 
-    builder
+    builder = builder
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_notification::init());
+    // TaskDialogIndirect needs the common-controls manifest, which Tauri only
+    // embeds in the binary. Keep the plugin out of the library test harness.
+    #[cfg(not(test))]
+    {
+        builder = builder.plugin(tauri_plugin_dialog::init());
+    }
+    builder
         .manage(Arc::clone(&state))
         .invoke_handler(commands::handlers())
         .setup(move |app| {
             let handle = app.handle().clone();
 
+            state.bind_app(handle.clone());
             tray::build(&handle)?;
             hotkeys::register(&handle, &state);
 

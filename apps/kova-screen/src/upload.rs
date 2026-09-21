@@ -110,6 +110,7 @@ pub fn run(
         }
     }
 
+    state.notify_history_changed();
     result
 }
 

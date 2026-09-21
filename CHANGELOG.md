@@ -7,6 +7,28 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- The selector can click a window, press Enter for the display under the
+  pointer, nudge with the arrow keys, and show a magnifier. Space, or
+  Alt+Print Screen, repeats the previous rectangle.
+- A hotkey for capturing every display.
+- Recording the window or display chosen in that selector, without copying the
+  whole desktop first. An optional countdown runs before the selector.
+- A shutter sound, off by default.
+- Recent Captures can copy a screenshot as an image. Delete asks first. The
+  list reloads when a capture is saved and follows the history limit, up to
+  2000 rows.
+- Recordings store their dimensions. The saved-file notice says when a GIF was
+  scaled down, when a region was trimmed to one display, and when Windows
+  cannot hide the recorder overlay.
+- A GIF maximum-width setting. About opens the release list.
+- A notice when a capture came from an HDR display. The image is still SDR.
+
+### Changed
+
+- MP4 files are no longer offered for upload. vgy.me does not accept them.
+
 ## [0.1.3] - 2026-09-14
 
 ### Added

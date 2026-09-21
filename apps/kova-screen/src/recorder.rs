@@ -60,6 +60,10 @@ pub struct RecorderHandle {
     paused: Arc<AtomicBool>,
     /// Set once `stop` has consumed the encoder.
     finished: bool,
+    width: u32,
+    height: u32,
+    source_width: u32,
+    clipped: bool,
 }
 
 /// How a recording ended.
@@ -72,6 +76,14 @@ pub struct RecordingSummary {
     pub size_bytes: u64,
     /// True when a size limit cut the recording short.
     pub truncated: bool,
+    pub width: u32,
+    pub height: u32,
+    /// The selection crossed onto another display and was trimmed to one.
+    pub clipped: bool,
+    /// A GIF was scaled down to the configured width.
+    pub scaled_down: bool,
+    /// False on Windows builds that cannot hide the recorder overlay.
+    pub overlay_excluded: bool,
 }
 
 /// Shared timeline for the overlay, output timestamps and duration limit.
@@ -119,6 +131,13 @@ impl RecorderHandle {
         path: PathBuf,
     ) -> Result<Self> {
         let (session_target, extent) = target.resolve()?;
+        let clipped = match target {
+            RecordingTarget::Region(rect) => {
+                (extent.width as u64) * (extent.height as u64)
+                    < (rect.width as u64) * (rect.height as u64)
+            }
+            RecordingTarget::Monitor(_) | RecordingTarget::Window(_) => false,
+        };
 
         let fps = match format {
             RecordingFormat::Mp4 => settings.recording.mp4_fps,
@@ -154,7 +173,8 @@ impl RecorderHandle {
                 &path,
                 GifOptions {
                     fps,
-                    max_width: Some(1280),
+                    max_width: (settings.recording.gif_max_width > 0)
+                        .then_some(settings.recording.gif_max_width),
                     max_bytes: settings.recording.gif_max_size_mb as u64 * 1024 * 1024,
                     quality: 10,
                 },
@@ -223,6 +243,10 @@ impl RecorderHandle {
             clock,
             paused,
             finished: false,
+            width: visible_extent.width,
+            height: visible_extent.height,
+            source_width: visible_extent.width,
+            clipped,
         })
     }
 
@@ -275,6 +299,9 @@ impl RecorderHandle {
     pub fn stop(mut self) -> Result<RecordingSummary> {
         self.finished = true;
 
+        // Read this before the overlay thread exits and drops the flag.
+        let overlay_excluded = self.overlay.state().is_excluded_from_capture();
+
         // Stop capture first so no frame can arrive while the file is closing.
         let session_result = self.session.stop();
         self.overlay.close();
@@ -286,6 +313,9 @@ impl RecorderHandle {
             .ok_or_else(|| Error::Encode("the recording was already finalised".into()))?;
 
         let duration = self.elapsed();
+        let mut width = self.width;
+        let mut height = self.height;
+        let mut scaled_down = false;
         let (frames, truncated) = match encoder {
             Encoder::Mp4(recorder) => {
                 let summary = recorder.finish()?;
@@ -293,6 +323,11 @@ impl RecorderHandle {
             }
             Encoder::Gif(recorder) => {
                 let summary = recorder.finish()?;
+                if summary.width > 0 {
+                    scaled_down = summary.width < self.source_width;
+                    width = summary.width;
+                    height = summary.height;
+                }
                 (summary.frames, summary.truncated)
             }
         };
@@ -312,6 +347,11 @@ impl RecorderHandle {
             duration,
             size_bytes,
             truncated,
+            width,
+            height,
+            clipped: self.clipped,
+            scaled_down,
+            overlay_excluded,
         })
     }
 }

@@ -192,6 +192,13 @@ function body(root: HTMLElement): HTMLElement[] {
           ),
         ),
         field(
+          "Shutter sound",
+          "Play a sound after a screenshot is saved or copied.",
+          toggle(s.capture.play_sound, (v) =>
+            void commit(root, (n) => { n.capture.play_sound = v; }),
+          ),
+        ),
+        field(
           "Capture delay",
           "Milliseconds to wait before the shutter fires.",
           numberInput(s.capture.delay_ms, 0, 10000, (v) =>
@@ -265,7 +272,23 @@ function body(root: HTMLElement): HTMLElement[] {
             void commit(root, (n) => { n.recording.gif_max_size_mb = v; }),
           ),
         ),
-        note("Audio is not recorded in v0.1."),
+        field(
+          "GIF max width",
+          "Pixels. Wider recordings are scaled down, and the notice says when that happened. 0 keeps the full width.",
+          numberInput(s.recording.gif_max_width, 0, 8192, (v) =>
+            void commit(root, (n) => { n.recording.gif_max_width = v; }),
+          ),
+        ),
+        field(
+          "Countdown",
+          "Seconds to wait before the recording selector accepts a drag. 0 starts immediately.",
+          numberInput(s.recording.countdown_secs, 0, 10, (v) =>
+            void commit(root, (n) => { n.recording.countdown_secs = v; }),
+          ),
+        ),
+        note(
+          "Drag a region, click a window, or press Enter for the display under the pointer. A recording stays on one display. Audio is not recorded.",
+        ),
       ];
 
     case "upload":
@@ -302,7 +325,7 @@ function body(root: HTMLElement): HTMLElement[] {
         ),
         field(
           "History entries",
-          "Older entries are forgotten. Files are never deleted.",
+          "Older entries are forgotten. Files are never deleted. The list shows at most 2000.",
           numberInput(s.storage.history_limit, 0, 100000, (v) =>
             void commit(root, (n) => { n.storage.history_limit = v; }),
           ),
@@ -323,6 +346,11 @@ function body(root: HTMLElement): HTMLElement[] {
             "you turn on uploads.",
         ),
         field("Version", null, h("span", { class: "capture__sub" }, view.version)),
+        field(
+          "Releases",
+          "Opens the download page in your browser.",
+          h("button", { onClick: () => void api.openReleases().catch(showError) }, "View releases"),
+        ),
         field(
           "License",
           null,
@@ -403,12 +431,8 @@ function uploadSection(root: HTMLElement, s: Settings): HTMLElement[] {
         void commit(root, (n) => { n.upload.auto_upload_gifs = v; }),
       ),
     ),
-    field(
-      "Auto-upload recordings",
-      "vgy.me does not accept MP4; these are kept locally.",
-      toggle(s.upload.auto_upload_recordings, (v) =>
-        void commit(root, (n) => { n.upload.auto_upload_recordings = v; }),
-      ),
+    note(
+      "vgy.me accepts screenshots and GIFs. MP4 recordings stay in the capture folder.",
     ),
     field(
       "Copy",
@@ -450,6 +474,8 @@ const HOTKEY_FIELDS: readonly (readonly [keyof Settings["hotkeys"], string])[] =
   ["record_mp4", "Record MP4"],
   ["record_gif", "Record GIF"],
   ["stop_recording", "Stop recording"],
+  ["all_monitors_screenshot", "All displays"],
+  ["repeat_last_region", "Repeat last region"],
 ];
 
 function hotkeysSection(root: HTMLElement, s: Settings): HTMLElement[] {

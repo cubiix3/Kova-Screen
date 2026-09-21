@@ -8,6 +8,7 @@
  * asset protocol, so nothing is copied or cached to build this view.
  */
 
+import { listen } from "@tauri-apps/api/event";
 import { api, describeError } from "./ipc";
 import type { Capture } from "./ipc";
 import { brandMark, formatDate, formatSize, h, render, toast } from "./dom";
@@ -17,11 +18,14 @@ let busy: number | null = null;
 
 export async function mountHistory(root: HTMLElement): Promise<void> {
   await reload(root);
+  await listen("history-changed", () => {
+    if (busy === null) void reload(root);
+  });
 }
 
 async function reload(root: HTMLElement): Promise<void> {
   try {
-    captures = await api.getHistory(200);
+    captures = await api.getHistory();
   } catch (error) {
     render(
       root,
@@ -44,7 +48,7 @@ function draw(root: HTMLElement): void {
         ? h(
             "div",
             { class: "empty" },
-            "No captures yet. Press Print Screen to take one.",
+            "No captures yet. Press Print Screen, then drag a region or click a window.",
           )
         : h("div", { class: "history" }, ...captures.map((c) => row(root, c))),
     ),
@@ -119,18 +123,25 @@ function row(root: HTMLElement, capture: Capture): HTMLElement {
       { class: "capture__actions" },
       action("Open", () => api.openCapture(capture.id)),
       action("Folder", () => api.revealCapture(capture.id)),
-      action("Copy", () => api.copyCaptureFile(capture.id).then(() => toast("File copied."))),
+      capture.kind === "screenshot"
+        ? action("Image", () =>
+            api.copyCaptureImage(capture.id).then(() => toast("Image copied.")),
+          )
+        : null,
+      action("File", () => api.copyCaptureFile(capture.id).then(() => toast("File copied."))),
       action("Path", () => api.copyCapturePath(capture.id).then(() => toast("Path copied."))),
       capture.upload_state === "uploaded"
         ? action("URL", () =>
             api.copyCaptureUrl(capture.id).then(() => toast("Link copied.")),
           )
-        : action(busy === capture.id ? "Uploading…" : "Upload", async () => {
-            busy = capture.id;
-            draw(root);
-            const url = await api.uploadCapture(capture.id);
-            toast(`Uploaded: ${url}`);
-          }),
+        : capture.kind === "video"
+          ? null
+          : action(busy === capture.id ? "Uploading…" : "Upload", async () => {
+              busy = capture.id;
+              draw(root);
+              const url = await api.uploadCapture(capture.id);
+              toast(`Uploaded: ${url}`);
+            }),
       capture.upload_state === "uploaded"
         ? action(
             "Delete online",
@@ -141,7 +152,15 @@ function row(root: HTMLElement, capture: Capture): HTMLElement {
             "danger",
           )
         : null,
-      action("Delete", () => api.deleteCaptureFile(capture.id), "danger"),
+      action(
+        "Delete",
+        async () => {
+          if (!window.confirm(`Delete ${capture.file_name}?`)) return;
+          await api.deleteCaptureFile(capture.id);
+          toast("Deleted.");
+        },
+        "danger",
+      ),
     ),
   );
 }

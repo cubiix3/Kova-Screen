@@ -58,6 +58,9 @@ pub struct GifSummary {
     pub bytes: u64,
     /// True when the byte budget cut the recording short.
     pub truncated: bool,
+    /// Canvas size written into the file. Zero when no frame arrived.
+    pub width: u32,
+    pub height: u32,
 }
 
 /// A GIF encoder that consumes frames one at a time.
@@ -171,10 +174,13 @@ impl GifRecorder {
             None => 0,
         };
 
+        let (width, height) = self.extent.unwrap_or((0, 0));
         Ok(GifSummary {
             frames: self.frames,
             bytes,
             truncated: self.truncated,
+            width,
+            height,
         })
     }
 

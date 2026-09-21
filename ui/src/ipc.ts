@@ -41,6 +41,8 @@ export interface RecordingSettings {
   hardware_encoding: boolean;
   max_duration_secs: number;
   gif_max_size_mb: number;
+  gif_max_width: number;
+  countdown_secs: number;
 }
 
 export interface UploadSettings {
@@ -67,6 +69,8 @@ export interface HotkeySettings {
   record_mp4: string;
   record_gif: string;
   stop_recording: string;
+  all_monitors_screenshot: string;
+  repeat_last_region: string;
 }
 
 export interface Settings {
@@ -115,6 +119,7 @@ export type ActionId =
   | "screenshot_fullscreen"
   | "screenshot_all_monitors"
   | "screenshot_window"
+  | "screenshot_repeat_region"
   | "record_mp4"
   | "record_gif"
   | "stop_recording";
@@ -132,6 +137,8 @@ export const api = {
   revealCapture: (id: number) => invoke<void>("reveal_capture", { id }),
   openCaptureFolder: () => invoke<void>("open_capture_folder"),
   copyCaptureFile: (id: number) => invoke<void>("copy_capture_file", { id }),
+  copyCaptureImage: (id: number) => invoke<void>("copy_capture_image", { id }),
+  openReleases: () => invoke<void>("open_releases"),
   copyCapturePath: (id: number) => invoke<void>("copy_capture_path", { id }),
   copyCaptureUrl: (id: number) => invoke<void>("copy_capture_url", { id }),
   uploadCapture: (id: number) => invoke<string>("upload_capture", { id }),

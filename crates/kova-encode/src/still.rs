@@ -99,6 +99,23 @@ fn flatten_to_rgb(rgba: &Bitmap, background: [u8; 3]) -> Vec<u8> {
     out
 }
 
+/// Decodes a PNG, JPEG or WebP file into a BGRA bitmap.
+///
+/// Used when a saved screenshot has to go back onto the clipboard as an image.
+pub fn decode_file(path: &std::path::Path) -> Result<Bitmap> {
+    let image = image::ImageReader::open(path)
+        .map_err(|e| Error::Encode(format!("could not open the image: {e}")))?
+        .with_guessed_format()
+        .map_err(|e| Error::Encode(format!("could not detect the image type: {e}")))?
+        .decode()
+        .map_err(|e| Error::Encode(format!("could not decode the image: {e}")))?;
+    let rgba = image.into_rgba8();
+    let (width, height) = rgba.dimensions();
+    let mut bitmap = Bitmap::from_raw(width, height, PixelFormat::Rgba8, rgba.into_raw())?;
+    bitmap.convert_to(PixelFormat::Bgra8);
+    Ok(bitmap)
+}
+
 /// Whether `quality` has any effect for `format`.
 ///
 /// Drives the settings UI so the slider is disabled rather than misleading.
@@ -286,5 +303,22 @@ mod tests {
     fn flatten_maps_full_transparency_to_the_background() {
         let bmp = Bitmap::from_raw(1, 1, PixelFormat::Rgba8, vec![10, 20, 30, 0]).unwrap();
         assert_eq!(flatten_to_rgb(&bmp, [255, 255, 255]), vec![255, 255, 255]);
+    }
+
+    #[test]
+    fn a_saved_png_decodes_back_to_the_same_pixels() {
+        let bmp = Bitmap::from_raw(1, 1, PixelFormat::Bgra8, vec![10, 20, 30, 255]).unwrap();
+        let bytes = encode_still(&bmp, ImageFormat::Png, 100).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "kova-decode-{}-{}.png",
+            std::process::id(),
+            bmp.data()[0]
+        ));
+        std::fs::write(&path, &bytes).unwrap();
+        let decoded = decode_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(decoded.width(), 1);
+        assert_eq!(decoded.format(), PixelFormat::Bgra8);
+        assert_eq!(decoded.data(), &[10, 20, 30, 255]);
     }
 }

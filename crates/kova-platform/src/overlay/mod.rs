@@ -11,4 +11,4 @@ pub mod region;
 pub mod status;
 
 pub use recorder::{RecorderCommand, RecorderOverlay, RecorderState};
-pub use region::Selection;
+pub use region::{RecordPick, Selection, StillPick};

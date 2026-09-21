@@ -182,6 +182,59 @@ pub fn clamp_to_desktop(rect: Rect) -> Result<Rect> {
         .ok_or_else(|| Error::Capture("the selected region is off-screen".into()))
 }
 
+/// Whether `rect` overlaps a display that is presenting HDR.
+///
+/// Capture itself is SDR. Callers use this to say so when the user would
+/// otherwise wonder why an HDR desktop looks flat in the file.
+pub fn intersects_hdr(rect: &Rect) -> bool {
+    if rect.is_empty() {
+        return false;
+    }
+    list().into_iter().any(|monitor| {
+        monitor.bounds.intersect(rect).is_some() && output_is_hdr(&monitor.device_name)
+    })
+}
+
+/// Whether the DXGI output for `device_name` is in an HDR color space.
+///
+/// A missing output, an older DXGI runtime, or any query failure reads as SDR.
+/// A false negative only skips a notice; it never changes the pixels.
+fn output_is_hdr(device_name: &str) -> bool {
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput6};
+    use windows_core::Interface;
+
+    let wanted = device_name.trim_end_matches('\0');
+    // SAFETY: CreateDXGIFactory1 takes no inputs. Failure means we cannot tell.
+    let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else {
+        return false;
+    };
+
+    let mut adapter_index = 0u32;
+    while let Ok(adapter) = unsafe { factory.EnumAdapters1(adapter_index) } {
+        adapter_index += 1;
+        let mut output_index = 0u32;
+        while let Ok(output) = unsafe { adapter.EnumOutputs(output_index) } {
+            output_index += 1;
+            let Ok(desc) = (unsafe { output.GetDesc() }) else {
+                continue;
+            };
+            let name = String::from_utf16_lossy(desc.DeviceName.as_slice());
+            if !name.trim_end_matches('\0').eq_ignore_ascii_case(wanted) {
+                continue;
+            }
+            let Ok(output6) = output.cast::<IDXGIOutput6>() else {
+                return false;
+            };
+            let Ok(desc1) = (unsafe { output6.GetDesc1() }) else {
+                return false;
+            };
+            return desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +330,18 @@ mod tests {
     fn point_far_outside_snaps_to_the_nearest_monitor() {
         // MONITOR_DEFAULTTONEAREST must never leave us without a monitor.
         assert!(from_point(Point::new(i32::MAX / 2, i32::MAX / 2)).is_some());
+    }
+
+    #[test]
+    fn an_empty_rect_is_not_reported_as_hdr() {
+        assert!(!intersects_hdr(&Rect::new(0, 0, 0, 0)));
+    }
+
+    #[test]
+    fn hdr_query_accepts_every_connected_display_name() {
+        for monitor in list() {
+            let _ = output_is_hdr(&monitor.device_name);
+        }
     }
 
     #[test]

@@ -101,25 +101,45 @@ pub fn take_screenshot(state: &Arc<AppState>, request: ShotRequest) -> Result<Ca
 
     // The region overlay returns the pixels it froze, so there is no second
     // capture and no chance of a mismatch with what the user selected.
-    let bitmap = match request {
-        ShotRequest::Region => match kova_platform::overlay::region::select_with_cursor(
-            settings.capture.include_cursor,
-        )? {
-            Some(selection) => selection.bitmap,
-            None => return Ok(CaptureOutcome::cancelled()),
-        },
+    // A click picks a window instead, which is captured live so covered
+    // windows stay correct.
+    let (bitmap, source) = match request {
+        ShotRequest::Region => {
+            match kova_platform::overlay::region::select_with_cursor(
+                settings.capture.include_cursor,
+                state.last_region(),
+            )? {
+                Some(kova_platform::overlay::StillPick::Pixels(selection)) => {
+                    state.remember_region(selection.rect);
+                    (selection.bitmap, Some(selection.rect))
+                }
+                Some(kova_platform::overlay::StillPick::Window(id)) => {
+                    let bounds = kova_capture::window::bounds(id).ok();
+                    let bitmap = kova_capture::capture(
+                        kova_capture::CaptureTarget::Window(id),
+                        CaptureOptions {
+                            include_cursor: settings.capture.include_cursor,
+                        },
+                    )?;
+                    (bitmap, bounds)
+                }
+                None => return Ok(CaptureOutcome::cancelled()),
+            }
+        }
         other => {
+            let source = target_bounds(other);
             let target = resolve_target(other)?;
-            kova_capture::capture(
+            let bitmap = kova_capture::capture(
                 target,
                 CaptureOptions {
                     include_cursor: settings.capture.include_cursor,
                 },
-            )?
+            )?;
+            (bitmap, source)
         }
     };
 
-    finish_still(state, &settings, bitmap)
+    finish_still(state, &settings, bitmap, source)
 }
 
 /// Everything after the pixels exist: encode, save, clipboard, history, upload.
@@ -127,6 +147,7 @@ fn finish_still(
     state: &Arc<AppState>,
     settings: &Settings,
     bitmap: Bitmap,
+    source: Option<kova_screen_core::Rect>,
 ) -> Result<CaptureOutcome> {
     let format = settings.capture.format;
 
@@ -193,6 +214,19 @@ fn finish_still(
             // afterthought and the capture itself is intact.
             Err(err) => tracing::warn!(%err, "could not record the capture in history"),
         }
+        state.notify_history_changed();
+    }
+
+    if let Some(rect) = source
+        && kova_capture::monitor::intersects_hdr(&rect)
+    {
+        outcome
+            .warnings
+            .push("This display is HDR. The image was saved in SDR.".into());
+    }
+
+    if settings.capture.play_sound && (outcome.path.is_some() || outcome.copied) {
+        kova_platform::sound::play_capture();
     }
 
     // --- Upload -----------------------------------------------------------
@@ -266,6 +300,19 @@ pub fn reserve_recording_path(settings: &Settings, extension: &str) -> Result<Pa
     })
 }
 
+/// The desktop rectangle a non-overlay capture will cover, for the HDR notice.
+fn target_bounds(request: ShotRequest) -> Option<kova_screen_core::Rect> {
+    match request {
+        ShotRequest::Fullscreen => kova_capture::monitor::from_cursor()
+            .or_else(kova_capture::monitor::primary)
+            .map(|monitor| monitor.bounds),
+        ShotRequest::AllMonitors => kova_capture::monitor::virtual_desktop_bounds().ok(),
+        ShotRequest::ActiveWindow => kova_capture::window::foreground().map(|window| window.bounds),
+        ShotRequest::Window(id) => kova_capture::window::bounds(id).ok(),
+        ShotRequest::Region => None,
+    }
+}
+
 /// Turns a request into a concrete capture target.
 fn resolve_target(request: ShotRequest) -> Result<CaptureTarget> {
     Ok(match request {
@@ -289,6 +336,22 @@ fn resolve_target(request: ShotRequest) -> Result<CaptureTarget> {
             return Err(Error::Capture("a region capture needs the overlay".into()));
         }
     })
+}
+
+/// Captures `rect` directly, without the selector.
+///
+/// Used to repeat the previous region. The rectangle is clamped to the desktop
+/// by the caller when it can be.
+pub fn capture_rect(state: &Arc<AppState>, rect: kova_screen_core::Rect) -> Result<CaptureOutcome> {
+    let settings = state.settings();
+    apply_delay(&settings);
+    let mut bitmap = kova_capture::gdi::capture_rect(rect)?;
+    if settings.capture.include_cursor
+        && let Err(err) = kova_capture::cursor::draw_into(&mut bitmap, rect)
+    {
+        tracing::warn!(%err, "could not include the cursor");
+    }
+    finish_still(state, &settings, bitmap, Some(rect))
 }
 
 /// Honours the configured shutter delay.
@@ -503,7 +566,7 @@ mod tests {
         };
         let run = |settings: &Settings| {
             let state = AppState::for_test(settings.clone());
-            finish_still(&state, settings, bitmap()).unwrap()
+            finish_still(&state, settings, bitmap(), None).unwrap()
         };
 
         let saved = run(&settings);

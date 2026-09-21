@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use kova_history::History;
 use kova_screen_core::settings::Settings;
-use kova_screen_core::{Result, paths};
+use kova_screen_core::{Rect, Result, paths};
 use kova_upload::{UploadProvider, VgyProvider};
 use parking_lot::{Mutex, RwLock};
 
@@ -29,6 +29,10 @@ pub struct AppState {
     recorder: Mutex<Option<RecorderHandle>>,
     /// Hotkey bindings that could not be registered, surfaced in settings.
     hotkey_failures: RwLock<Vec<kova_platform::HotkeyFailure>>,
+    /// The last rectangle the user dragged, so it can be captured again.
+    last_region: Mutex<Option<Rect>>,
+    /// Set once the Tauri runtime exists. History events need it.
+    app: Mutex<Option<tauri::AppHandle>>,
 }
 
 impl AppState {
@@ -67,6 +71,8 @@ impl AppState {
             provider,
             recorder: Mutex::new(None),
             hotkey_failures: RwLock::new(Vec::new()),
+            last_region: Mutex::new(None),
+            app: Mutex::new(None),
         })
     }
 
@@ -84,6 +90,8 @@ impl AppState {
             provider,
             recorder: Mutex::new(None),
             hotkey_failures: RwLock::new(Vec::new()),
+            last_region: Mutex::new(None),
+            app: Mutex::new(None),
         })
     }
 
@@ -141,6 +149,30 @@ impl AppState {
 
     pub fn hotkey_failures(&self) -> Vec<kova_platform::HotkeyFailure> {
         self.hotkey_failures.read().clone()
+    }
+
+    pub fn bind_app(&self, app: tauri::AppHandle) {
+        *self.app.lock() = Some(app);
+    }
+
+    /// Tells an open Recent Captures window to reload. A missing runtime, which
+    /// is every test, does nothing.
+    pub fn notify_history_changed(&self) {
+        let Some(app) = self.app.lock().clone() else {
+            return;
+        };
+        use tauri::Emitter;
+        let _ = app.emit("history-changed", ());
+    }
+
+    pub fn last_region(&self) -> Option<Rect> {
+        *self.last_region.lock()
+    }
+
+    pub fn remember_region(&self, rect: Rect) {
+        if !rect.is_empty() {
+            *self.last_region.lock() = Some(rect);
+        }
     }
 }
 
