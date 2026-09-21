@@ -61,7 +61,20 @@ cargo tree -i glib --target all
 cargo tree -i glib --target x86_64-pc-windows-msvc
 ```
 
-Advisories against those crates will still be reported by Dependabot, because
-it reads the lockfile rather than the build graph. They do not affect a Kova
-Screen release. If you are triaging one, check it against the Windows target
-before treating it as exploitable here.
+Advisories against those crates are reported by Dependabot, because it reads
+the lockfile rather than the build graph. They do not affect a Kova Screen
+release. Check an alert against the Windows target before treating it as
+exploitable here.
+
+### GHSA-wrw7-89jp-8q8g (`glib` 0.18)
+
+[RUSTSEC-2024-0429](https://rustsec.org/advisories/RUSTSEC-2024-0429.html)
+affects `glib::VariantStrIter` in `glib` 0.15.0 through 0.19. The lockfile
+resolves `glib` 0.18.5 because Tauri 2 still depends on GTK 3 (`gtk` 0.18,
+`webkit2gtk` 2.0). That line is only fixed in `glib` 0.20, which does not
+build against GTK 3, and current stable Tauri has not moved to GTK 4.
+
+`cargo tree -i glib --target x86_64-pc-windows-msvc` prints nothing. The
+Windows installer does not compile or ship `glib`. The Dependabot alert is
+dismissed as not used for that reason, and it should be revisited when a
+stable Tauri release leaves `gtk` 0.18.
