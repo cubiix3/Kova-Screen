@@ -34,6 +34,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - The CI token can read the repository and write its own cache and artifacts.
 - A saved upload key is copied out of Credential Manager before that record is
   freed. The selection dim no longer writes through a raw bitmap pointer.
+- Library tests link the Windows common-controls manifest, so the test program
+  can start on a clean machine.
 
 ## [0.1.3] - 2026-09-14
 

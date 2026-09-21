@@ -18,6 +18,9 @@ crate-type = ["lib"]
 [[bin]]
 name = "kova-screen"
 path = "src/main.rs"
+# The binary already embeds the Windows manifest. Building it again as a test
+# harness would link that manifest twice and fail.
+test = false
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

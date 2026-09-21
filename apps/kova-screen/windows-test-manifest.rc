@@ -1,0 +1,2 @@
+// Common-controls 6, so test harnesses can load TaskDialogIndirect.
+1 24 "windows-test-manifest.xml"
