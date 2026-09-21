@@ -29,10 +29,11 @@ use kova_screen_core::{Bitmap, Error, PixelFormat, Point, Rect, Result};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_OVER, AlphaBlend, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, BeginPaint,
-    CreateCompatibleDC, CreateDIBSection, CreatePen, CreateSolidBrush, DIB_RGB_COLORS, DT_CENTER,
-    DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC,
-    HBRUSH, HDC, HGDIOBJ, InvalidateRect, PAINTSTRUCT, PS_SOLID, Rectangle, ReleaseDC, SRCCOPY,
-    SelectObject, SetBkMode, SetTextColor, StretchBlt, TRANSPARENT,
+    CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection, CreatePen, CreateSolidBrush,
+    DIB_RGB_COLORS, DT_CENTER, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW,
+    EndPaint, FillRect, GdiFlush, GetDC, HBRUSH, HDC, HGDIOBJ, InvalidateRect, PAINTSTRUCT,
+    PS_SOLID, Rectangle, ReleaseDC, SRCCOPY, SelectObject, SetBkMode, SetTextColor, StretchBlt,
+    TRANSPARENT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, ReleaseCapture, SetCapture, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT,
@@ -1071,37 +1072,34 @@ fn dim_rect(hdc: HDC, rect: RECT) {
         return;
     }
 
-    // A 1x1 black source stretched over the region: no per-pixel allocation.
-    // SAFETY: creates a scratch DC and bitmap, both released below.
+    // A 1x1 black source stretched over the region. Filled with GDI rather than
+    // by writing the bitmap's pixel pointer.
+    // SAFETY: creates a scratch DC, bitmap and brush, all released below.
     unsafe {
         let src_dc = CreateCompatibleDC(Some(hdc));
         if src_dc.is_invalid() {
             return;
         }
-        let info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: 1,
-                biHeight: -1,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-        let Ok(bitmap) = CreateDIBSection(Some(src_dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)
-        else {
+        let bitmap = CreateCompatibleBitmap(hdc, 1, 1);
+        if bitmap.is_invalid() {
             let _ = DeleteDC(src_dc);
             return;
-        };
-        if !bits.is_null() {
-            // Opaque black; the blend function supplies the constant alpha.
-            std::ptr::write_bytes(bits.cast::<u8>(), 0, 3);
-            *bits.cast::<u8>().add(3) = 0xFF;
         }
         let previous = SelectObject(src_dc, HGDIOBJ(bitmap.0));
+        let brush = CreateSolidBrush(COLORREF(0));
+        if !brush.is_invalid() {
+            FillRect(
+                src_dc,
+                &RECT {
+                    left: 0,
+                    top: 0,
+                    right: 1,
+                    bottom: 1,
+                },
+                brush,
+            );
+            let _ = DeleteObject(HGDIOBJ(brush.0));
+        }
 
         let blend = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as u8,
@@ -1118,6 +1116,9 @@ fn dim_rect(hdc: HDC, rect: RECT) {
         }
         let _ = DeleteObject(HGDIOBJ(bitmap.0));
         let _ = DeleteDC(src_dc);
+        // Deleted GDI objects can stay in the process count until the queue
+        // is flushed. Flush here so a tight repaint loop does not look like a leak.
+        let _ = GdiFlush();
     }
 }
 

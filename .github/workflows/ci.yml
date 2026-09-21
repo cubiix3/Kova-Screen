@@ -16,6 +16,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# The default token can write the repository. CI only needs to read the
+# checkout and to publish its own cache and installer artifact.
+permissions:
+  contents: read
+  actions: write
+
 env:
   CARGO_TERM_COLOR: always
   # Debug info roughly doubles compile time and target size, and nothing in CI

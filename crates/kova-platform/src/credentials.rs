@@ -87,31 +87,33 @@ pub fn load(target: &str) -> Result<Option<String>> {
     if credential.is_null() {
         return Ok(None);
     }
-    let _guard = CredGuard(credential);
 
-    // SAFETY: `credential` is non-null and owned by us until CredFree.
-    let (ptr, len) = unsafe {
-        (
-            (*credential).CredentialBlob,
-            (*credential).CredentialBlobSize as usize,
-        )
+    // Copy the secret out before the credential record is freed. The raw
+    // pointer is only read in this block, and CredFree runs after that read.
+    let bytes = unsafe {
+        let blob = (*credential).CredentialBlob;
+        let len = (*credential).CredentialBlobSize as usize;
+        let copied = if blob.is_null() || len == 0 {
+            Vec::new()
+        } else if len > MAX_SECRET_BYTES {
+            CredFree(credential.cast());
+            return Err(Error::Credential(
+                "the stored key is implausibly large".into(),
+            ));
+        } else {
+            std::slice::from_raw_parts(blob, len).to_vec()
+        };
+        CredFree(credential.cast());
+        copied
     };
 
-    if ptr.is_null() || len == 0 {
+    if bytes.is_empty() {
         return Ok(None);
     }
-    if len > MAX_SECRET_BYTES {
-        return Err(Error::Credential(
-            "the stored key is implausibly large".into(),
-        ));
-    }
-
-    // SAFETY: the vault reports `len` readable bytes at `ptr`.
-    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
 
     // A blob written by another tool need not be valid UTF-8. Report that
     // rather than panicking or silently sending mojibake to the upload host.
-    let secret = String::from_utf8(bytes.to_vec())
+    let secret = String::from_utf8(bytes)
         .map_err(|_| Error::Credential("the stored key is not valid text".into()))?;
 
     Ok(Some(secret))
@@ -136,18 +138,6 @@ pub fn delete(target: &str) -> Result<()> {
 /// across the IPC boundary into the WebView.
 pub fn exists(target: &str) -> bool {
     matches!(load(target), Ok(Some(_)))
-}
-
-/// Frees a credential returned by `CredReadW`.
-struct CredGuard(*mut CREDENTIALW);
-
-impl Drop for CredGuard {
-    fn drop(&mut self) {
-        // SAFETY: the pointer came from CredReadW and is freed exactly once.
-        unsafe {
-            CredFree(self.0.cast());
-        }
-    }
 }
 
 #[cfg(test)]
