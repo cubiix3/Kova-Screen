@@ -7,8 +7,7 @@
 Fast, minimal screen capture for Windows. Screenshots, GIF and MP4 recording,
 clipboard integration and optional upload — without the feature sprawl.
 
-Part of the Kova family, alongside [Kova File](https://github.com/cubiix3/Kova-File-Manager)
-and [Kova Image](https://github.com/cubiix3/Kova-Image).
+Part of the Kova family, alongside [Kova Image](https://github.com/cubiix3/Kova-Image).
 
 ```
 Hotkey  →  select  →  capture  →  save  →  clipboard  →  (optional) upload
