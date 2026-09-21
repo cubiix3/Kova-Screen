@@ -179,7 +179,7 @@ function body(root: HTMLElement): HTMLElement[] {
         ),
         field(
           "Also copy the screenshot file",
-          "When clipboard copying is enabled, also offer the saved file. Some apps may paste an attachment instead of an inline image. In Claude Code on Windows, use Alt+V to paste an image.",
+          "When clipboard copying is enabled, also offer the saved file. Some apps may paste an attachment instead of an inline image.",
           toggle(s.capture.copy_file_to_clipboard, (v) =>
             void commit(root, (n) => { n.capture.copy_file_to_clipboard = v; }),
           ),

@@ -85,10 +85,8 @@ There is no audio.
 - **Settings › Capture › Also copy the screenshot file** additionally offers the
   saved file to apps that accept file drops. Off by default, and only while
   **Copy to clipboard** is on. Some apps then paste an attachment instead of an
-  inline image. If saving fails, only the image is copied.
-- In Claude Code on Windows, paste an image with **Alt+V**
-  ([keyboard shortcuts](https://code.claude.com/docs/en/interactive-mode)).
-  Ordinary terminal paste does not accept images or file drops.
+  inline image. If saving fails, only the image is copied. Ordinary terminal
+  paste does not accept images or file drops.
 - Optional upload to [vgy.me](https://vgy.me). Screenshots and GIFs only. MP4
   stays in the capture folder, because vgy.me does not accept it. The upload is
   off until you turn it on. A failed upload reads *"Screenshot saved / Upload

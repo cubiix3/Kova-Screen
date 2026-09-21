@@ -35,7 +35,6 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Optionally copy a saved screenshot as a file alongside the image clipboard
   formats, so Explorer and apps that accept file drops can receive it.
-- Document Claude Code's `Alt+V` image-paste shortcut on Windows.
 
 ### Fixed
 
