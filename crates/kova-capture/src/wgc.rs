@@ -307,6 +307,19 @@ mod tests {
     }
 
     #[test]
+    fn wgc_frames_are_fully_opaque() {
+        crate::require_interactive_desktop!();
+        let m = monitor::primary().expect("a primary monitor");
+        let bmp = capture_monitor(m.id).expect("wgc monitor capture");
+        // WGC's alpha channel reflects window composition, not the pixels a user
+        // sees, so it must be normalised before the frame is saved or pasted.
+        assert!(
+            bmp.data().as_chunks::<4>().0.iter().all(|px| px[3] == 0xFF),
+            "a wgc frame kept transparent pixels"
+        );
+    }
+
+    #[test]
     fn a_stale_monitor_handle_is_rejected() {
         assert!(capture_monitor(MonitorId(1)).is_err());
     }

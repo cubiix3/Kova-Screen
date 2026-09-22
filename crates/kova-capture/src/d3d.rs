@@ -201,7 +201,13 @@ impl D3dDevice {
         unsafe { self.context.Unmap(&staging, 0) };
 
         let data = result?;
-        Bitmap::from_raw(width, height, PixelFormat::Bgra8, data)
+        let mut bitmap = Bitmap::from_raw(width, height, PixelFormat::Bgra8, data)?;
+        // WGC hands back the composited window alpha, which is not meaningful
+        // for a screenshot: a layered or rounded window would otherwise be saved
+        // and pasted with transparent holes. GDI forces opacity the same way, so
+        // both backends deliver an opaque image.
+        bitmap.set_opaque();
+        Ok(bitmap)
     }
 
     /// Copies `height` rows out of a mapped subresource, discarding GPU padding.
