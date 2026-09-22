@@ -33,6 +33,9 @@ cd ui && npm ci && cd ..
 npx @tauri-apps/cli@2 dev --config apps/kova-screen/tauri.conf.json
 ```
 
+Through the script, quote the separator (`'--'`): PowerShell swallows a bare
+`--`, for example `.\scripts\cargo-msvc.ps1 clippy --workspace --all-targets '--' -D warnings`.
+
 ## Before you push
 
 Run what CI runs:

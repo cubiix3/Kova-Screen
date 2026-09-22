@@ -13,15 +13,25 @@
     It avoids calling the system `cmd` command because some environments have a
     Node wrapper at `cmd` that breaks argument parsing.
 
+    Quote the `--` separator. PowerShell consumes a bare `--` itself, so cargo
+    would never see it and the arguments after it would go to cargo instead of
+    to the test harness or clippy.
+
 .EXAMPLE
     .\scripts\cargo-msvc.ps1 check --workspace
-    .\scripts\cargo-msvc.ps1 test --workspace -- --test-threads=1
+    .\scripts\cargo-msvc.ps1 test --workspace '--' --test-threads=1
+    .\scripts\cargo-msvc.ps1 clippy --workspace --all-targets '--' -D warnings
     .\scripts\cargo-msvc.ps1 build --release
 #>
-param(
-    [Parameter(Mandatory = $true, ValueFromRemainingArguments = $true)]
-    [string[]]$CargoArgs
-)
+
+# Deliberately not a `param()` block: that makes this an advanced script, and
+# PowerShell would then bind `-D` from `-D warnings` to its own `-Debug`
+# switch and drop it. `$args` passes every token through untouched.
+$CargoArgs = @($args)
+if ($CargoArgs.Count -eq 0) {
+    Write-Error "Pass the cargo command to run, for example: check --workspace"
+    exit 2
+}
 
 $ErrorActionPreference = "Stop"
 
@@ -106,7 +116,7 @@ Write-Host "Visual Studio x64 environment loaded from: $vcvars" -ForegroundColor
 
 # If the user typed `cargo-msvc.ps1 cargo test ...`, drop the leading "cargo".
 if ($CargoArgs[0] -eq "cargo") {
-    $CargoArgs = $CargoArgs[1..($CargoArgs.Length - 1)]
+    $CargoArgs = @($CargoArgs | Select-Object -Skip 1)
 }
 
 $ErrorActionPreference = "Continue"
