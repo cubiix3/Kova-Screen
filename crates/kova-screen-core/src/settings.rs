@@ -74,7 +74,7 @@ pub enum Theme {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct GeneralSettings {
     pub launch_with_windows: bool,
     pub start_minimized: bool,
@@ -94,7 +94,7 @@ impl Default for GeneralSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct CaptureSettings {
     pub format: ImageFormat,
     /// Quality for the lossy formats, 1-100. Ignored for PNG.
@@ -152,7 +152,7 @@ impl RecordingQuality {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct RecordingSettings {
     /// Frames per second for MP4 capture. Clamped to 10..=60 on load.
     pub mp4_fps: u32,
@@ -192,7 +192,7 @@ impl Default for RecordingSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct UploadSettings {
     /// Master switch. When false, no upload code path runs at all.
     pub enabled: bool,
@@ -226,7 +226,7 @@ impl Default for UploadSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct StorageSettings {
     /// Empty means "use [`paths::default_capture_dir`]".
     pub capture_dir: Option<PathBuf>,
@@ -247,7 +247,7 @@ impl Default for StorageSettings {
 
 /// A parsed global hotkey binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct HotkeySettings {
     pub region_screenshot: String,
     pub fullscreen_screenshot: String,
@@ -317,7 +317,7 @@ impl HotkeySettings {
 
 /// The complete settings document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Settings {
     pub general: GeneralSettings,
     pub capture: CaptureSettings,
@@ -466,6 +466,18 @@ mod tests {
         assert_eq!(s.recording.gif_max_width, 1280);
         assert_eq!(s.recording.countdown_secs, 0);
         assert!(!s.capture.play_sound);
+    }
+
+    #[test]
+    fn unknown_fields_are_ignored_rather_than_resetting_everything() {
+        // Forward compatibility: a config written by a newer build can carry
+        // fields this build does not know. They must be skipped, not turn the
+        // whole file into a parse error that silently resets every preference.
+        let s: Settings = serde_json::from_str(
+            r#"{"capture":{"copy_to_clipboard":false},"future_feature":{"enabled":true}}"#,
+        )
+        .unwrap();
+        assert!(!s.capture.copy_to_clipboard);
     }
 
     #[test]
