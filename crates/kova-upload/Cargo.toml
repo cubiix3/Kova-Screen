@@ -22,5 +22,5 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 [dev-dependencies]
 tiny_http = "0.12"
 
-[lints.rust]
-unsafe_op_in_unsafe_fn = "deny"
+[lints]
+workspace = true

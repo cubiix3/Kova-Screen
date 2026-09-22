@@ -311,6 +311,7 @@ impl OverlayWindow {
             }
             // Sleep until input or the timer arrives, with a bounded wait for
             // close requests from the recording thread. No 60 Hz polling.
+            // SAFETY: no handles are passed; the call only waits on this thread's queue.
             unsafe {
                 let _ = windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx(
                     None,
@@ -413,6 +414,7 @@ fn register_class() -> Result<Vec<u16>> {
         style: CS_HREDRAW | CS_VREDRAW,
         lpfnWndProc: Some(window_proc),
         hInstance: module.handle().into(),
+        // SAFETY: IDC_ARROW is a system cursor; no module handle is needed.
         hCursor: unsafe {
             windows::Win32::UI::WindowsAndMessaging::LoadCursorW(
                 None,
@@ -465,6 +467,7 @@ unsafe extern "system" fn window_proc(
             let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
             let hovered = button_at(x, y);
             if state.hovered.swap(hovered, Ordering::Relaxed) != hovered {
+                // SAFETY: `hwnd` is the live window this procedure was called for.
                 unsafe {
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
@@ -475,6 +478,7 @@ unsafe extern "system" fn window_proc(
                 hwndTrack: hwnd,
                 ..Default::default()
             };
+            // SAFETY: `track` is a live, fully initialised local for this window.
             unsafe {
                 let _ = TrackMouseEvent(&mut track);
             }
@@ -482,6 +486,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_MOUSELEAVE => {
             state.hovered.store(0, Ordering::Relaxed);
+            // SAFETY: `hwnd` is the live window this procedure was called for.
             unsafe {
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
@@ -683,12 +688,14 @@ mod tests {
         struct RestoreCursor(windows::Win32::Foundation::POINT);
         impl Drop for RestoreCursor {
             fn drop(&mut self) {
+                // SAFETY: restores a cursor position read earlier; no pointers involved.
                 unsafe {
                     let _ = SetCursorPos(self.0.x, self.0.y);
                 }
             }
         }
         let mut previous = windows::Win32::Foundation::POINT::default();
+        // SAFETY: `previous` is a live local.
         unsafe {
             GetCursorPos(&mut previous).unwrap();
         }
@@ -702,6 +709,7 @@ mod tests {
         // overlay as the window under the cursor, and the TrackMouseEvent the
         // handler arms would fire WM_MOUSELEAVE at once, resetting the hover we
         // are about to assert. Park the overlay somewhere we control instead.
+        // SAFETY: `hwnd` is the live overlay window owned by this test.
         unsafe {
             SetWindowPos(
                 hwnd,
@@ -727,6 +735,7 @@ mod tests {
             "find_overlay_window returned a different overlay"
         );
         let mut bounds = RECT::default();
+        // SAFETY: `hwnd` is live and `bounds` is a live local.
         unsafe {
             GetWindowRect(hwnd, &mut bounds).unwrap();
         }
@@ -741,11 +750,13 @@ mod tests {
             // always immediate, so retry rather than assume.
             let mut on_target = false;
             for _ in 0..20 {
+                // SAFETY: moves the cursor; no pointers involved.
                 unsafe {
                     SetCursorPos(target.x, target.y).unwrap();
                 }
                 std::thread::sleep(Duration::from_millis(20));
                 let mut now = windows::Win32::Foundation::POINT::default();
+                // SAFETY: `now` is a live local.
                 unsafe {
                     GetCursorPos(&mut now).unwrap();
                 }
@@ -774,6 +785,7 @@ mod tests {
             // OS routed it here on the first try.
             let mut hovered = false;
             for _ in 0..20 {
+                // SAFETY: `hwnd` is the live overlay; the message carries no pointers.
                 unsafe {
                     SetCursorPos(target.x, target.y).unwrap();
                     SendMessageW(hwnd, WM_MOUSEMOVE, None, Some(point));
@@ -785,12 +797,14 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(5));
             }
             assert!(hovered, "WM_MOUSEMOVE never hovered button {id}");
+            // SAFETY: `hwnd` is the live overlay; the message carries no pointers.
             unsafe {
                 SendMessageW(hwnd, WM_LBUTTONDOWN, None, Some(point));
             }
             assert_eq!(state.take_pause_request(), id == 1);
             assert_eq!(state.take_stop_request(), id == 2);
         }
+        // SAFETY: `hwnd` is the live overlay; the message carries no pointers.
         unsafe {
             SendMessageW(hwnd, WM_MOUSELEAVE, None, None);
         }

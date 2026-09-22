@@ -56,6 +56,7 @@ fn keep_capture_apartment_alive() -> Result<()> {
         .get_or_init(|| {
             // The process owns this bounded runtime reference until termination,
             // just as it owns the cached WinRT factory interfaces.
+            // SAFETY: takes no inputs; the cookie is intentionally never released.
             unsafe { windows::Win32::System::Com::CoIncrementMTAUsage() }
                 .map(|cookie| cookie.0 as usize)
                 .map_err(|e| format!("could not initialise the capture runtime: {e}"))

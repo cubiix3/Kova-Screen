@@ -88,8 +88,9 @@ pub fn load(target: &str) -> Result<Option<String>> {
         return Ok(None);
     }
 
-    // Copy the secret out before the credential record is freed. The raw
-    // pointer is only read in this block, and CredFree runs after that read.
+    // SAFETY: `credential` is the record CredReadW just returned. The secret is
+    // copied out before the record is freed: the raw pointer is only read in
+    // this block, and CredFree runs after that read.
     let bytes = unsafe {
         let blob = (*credential).CredentialBlob;
         let len = (*credential).CredentialBlobSize as usize;

@@ -233,6 +233,8 @@ struct CaptureApartment;
 
 impl CaptureApartment {
     fn new() -> Result<Self> {
+        // SAFETY: called once on the capture thread; a successful call is
+        // balanced by RoUninitialize in Drop on the same thread.
         unsafe {
             windows::Win32::System::WinRT::RoInitialize(
                 windows::Win32::System::WinRT::RO_INIT_MULTITHREADED,
@@ -405,8 +407,8 @@ impl CapturePump {
     }
 }
 
-// The pump is created and used entirely on the capture thread; the WinRT
-// free-threaded frame pool is documented as callable from any apartment.
+// SAFETY: the pump is created and used entirely on the capture thread; the
+// WinRT free-threaded frame pool is documented as callable from any apartment.
 unsafe impl Send for CapturePump {}
 
 #[cfg(test)]

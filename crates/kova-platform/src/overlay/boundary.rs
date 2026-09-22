@@ -103,6 +103,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             }
             LRESULT(0)
         }
+        // SAFETY: default handling; `hwnd` is the live window this procedure was called for.
         _ => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     }
 }
@@ -114,6 +115,7 @@ mod tests {
     fn outline_is_hollow_excluded_and_released() {
         let window = BoundaryWindow::create(Rect::new(40, 40, 320, 240)).unwrap();
         let hwnd = window.0;
+        // SAFETY: `hwnd` is live until `window` is dropped below; the region is created and deleted here.
         unsafe {
             let region = CreateRectRgn(0, 0, 0, 0);
             assert_ne!(GetWindowRgn(hwnd, region), RGN_ERROR);
@@ -129,6 +131,7 @@ mod tests {
             );
         }
         drop(window);
+        // SAFETY: IsWindow accepts any handle value, including a destroyed one.
         assert!(!unsafe { IsWindow(Some(hwnd)) }.as_bool());
     }
 }

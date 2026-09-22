@@ -23,5 +23,5 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 [dev-dependencies]
 serde_json.workspace = true
 
-[lints.rust]
-unsafe_op_in_unsafe_fn = "deny"
+[lints]
+workspace = true

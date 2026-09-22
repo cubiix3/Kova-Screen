@@ -468,6 +468,7 @@ impl FrozenDesktop {
             unsafe { CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0) }
                 .map_err(|e| {
                     // No owner exists yet if DIB allocation fails.
+                    // SAFETY: `dc` was created above and has no other owner yet.
                     unsafe {
                         let _ = DeleteDC(dc);
                     }
@@ -1059,6 +1060,7 @@ fn draw_magnifier_from_screen(hdc: HDC, state: &OverlayState) {
         state.viewport_w,
         state.viewport_h,
     );
+    // SAFETY: `screen` came from GetDC(None) in this function and is released once.
     unsafe {
         ReleaseDC(None, screen);
     }
@@ -1261,6 +1263,7 @@ mod tests {
         let mut state = OverlayState::new(Rect::new(0, 0, 320, 240), desktop(320, 240)).unwrap();
         let output = FrozenDesktop::new(&desktop(320, 240)).unwrap();
         // GetPixel synchronises GDI drawing before inspecting the destination.
+        // SAFETY: callers pass a live memory DC owned by this test.
         let pixel = |dc, x, y| unsafe { GetPixel(dc, x, y) };
         let original = pixel(state.frozen.dc, 30, 30);
         present(output.dc, &state);
@@ -1296,6 +1299,7 @@ mod tests {
             present(output.dc, &state);
         };
         cycle();
+        // SAFETY: queries a count for the current-process pseudo handle.
         let count = || unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
         let before = count();
         for _ in 0..100 {

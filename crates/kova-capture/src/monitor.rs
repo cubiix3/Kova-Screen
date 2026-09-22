@@ -211,11 +211,16 @@ fn output_is_hdr(device_name: &str) -> bool {
     };
 
     let mut adapter_index = 0u32;
+    // SAFETY: here and in the queries below, `factory`, `adapter`, `output`
+    // and `output6` are live COM interfaces owned by this function; every call
+    // is a read-only query whose failure only ends the search.
     while let Ok(adapter) = unsafe { factory.EnumAdapters1(adapter_index) } {
         adapter_index += 1;
         let mut output_index = 0u32;
+        // SAFETY: see above; `adapter` is live.
         while let Ok(output) = unsafe { adapter.EnumOutputs(output_index) } {
             output_index += 1;
+            // SAFETY: see above; `output` is live.
             let Ok(desc) = (unsafe { output.GetDesc() }) else {
                 continue;
             };
@@ -226,6 +231,7 @@ fn output_is_hdr(device_name: &str) -> bool {
             let Ok(output6) = output.cast::<IDXGIOutput6>() else {
                 return false;
             };
+            // SAFETY: see above; `output6` is live.
             let Ok(desc1) = (unsafe { output6.GetDesc1() }) else {
                 return false;
             };

@@ -84,11 +84,15 @@ impl MediaFoundation {
     fn initialise() -> Result<Self> {
         // Keep the process MTA alive while the writer crosses worker threads.
         // Unlike CoInitializeEx, this cookie may be released on another thread.
+        // SAFETY: takes no inputs; the cookie is released exactly once below or
+        // by the runtime's Drop.
         let cookie = unsafe { windows::Win32::System::Com::CoIncrementMTAUsage() }
             .map_err(|e| Error::Encode(format!("could not initialise encoder COM: {e}")))?;
         // SAFETY: standard platform initialisation; NOSOCKET skips the network
         // source, which a screen recorder never needs.
         if let Err(e) = unsafe { MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET) } {
+            // SAFETY: `cookie` came from CoIncrementMTAUsage above and is not
+            // used again on this failure path.
             unsafe {
                 let _ = windows::Win32::System::Com::CoDecrementMTAUsage(cookie);
             }

@@ -112,8 +112,8 @@ fn show_message(message: Message, lifetime_ms: u32) -> Result<()> {
 }
 
 unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    // SAFETY: WM_NCCREATE carries the CREATESTRUCTW supplied at creation.
     if msg == WM_NCCREATE {
+        // SAFETY: WM_NCCREATE carries the CREATESTRUCTW supplied at creation.
         unsafe {
             let create = &*(lp.0 as *const CREATESTRUCTW);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as isize);
@@ -123,12 +123,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
     match msg {
         WM_ERASEBKGND => LRESULT(1),
         WM_TIMER | WM_LBUTTONUP => {
+            // SAFETY: `hwnd` is the live window this procedure was called for; it is destroyed once.
             unsafe {
                 let _ = DestroyWindow(hwnd);
             }
             LRESULT(0)
         }
         WM_DESTROY => {
+            // SAFETY: `hwnd` is the live window this procedure was called for; the timer was set on it at creation.
             unsafe {
                 let _ = KillTimer(Some(hwnd), 1);
                 PostQuitMessage(0);
@@ -193,6 +195,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             }
             LRESULT(0)
         }
+        // SAFETY: default handling; `hwnd` is the live window this procedure was called for.
         _ => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     }
 }
@@ -216,6 +219,7 @@ mod tests {
             .unwrap()
         };
         cycle();
+        // SAFETY: queries counts for the current-process pseudo handle.
         let count = || unsafe {
             (
                 GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS),
