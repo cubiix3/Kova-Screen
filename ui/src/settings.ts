@@ -44,6 +44,12 @@ const SECTIONS: readonly (readonly [Section, string])[] = [
 
 let view: SettingsView;
 let section: Section = "general";
+let settingsQueue: Promise<void> = Promise.resolve();
+
+function queueSettingsWork(work: () => Promise<void>): Promise<void> {
+  settingsQueue = settingsQueue.then(work).catch(showError);
+  return settingsQueue;
+}
 
 export async function mountSettings(root: HTMLElement): Promise<void> {
   try {
@@ -83,18 +89,18 @@ function draw(root: HTMLElement): void {
 }
 
 /** Persists a mutated settings object and refreshes the view. */
-async function commit(root: HTMLElement, mutate: (settings: Settings) => void): Promise<void> {
-  const next = structuredClone(view.settings);
-  mutate(next);
-  try {
-    view = await api.saveSettings(next);
-  } catch (error) {
-    toast(describeError(error), "error");
-    // Re-read, so the UI shows what was actually stored rather than the value
-    // the user tried to set.
-    view = await api.getSettings();
-  }
-  draw(root);
+function commit(root: HTMLElement, mutate: (settings: Settings) => void): Promise<void> {
+  return queueSettingsWork(async () => {
+    const next = structuredClone(view.settings);
+    mutate(next);
+    try {
+      view = await api.saveSettings(next);
+    } catch (error) {
+      toast(describeError(error), "error");
+      view = await api.getSettings();
+    }
+    draw(root);
+  });
 }
 
 function body(root: HTMLElement): HTMLElement[] {
@@ -389,15 +395,14 @@ function uploadSection(root: HTMLElement, s: Settings): HTMLElement[] {
           "button",
           {
             onClick: async () => {
-              try {
-                const saved = await api.setUserKey(keyInput.value);
+              const key = keyInput.value;
+              await queueSettingsWork(async () => {
+                const saved = await api.setUserKey(key);
                 keyInput.value = "";
                 view = await api.getSettings();
                 toast(saved ? "Key saved." : "Key cleared.");
                 draw(root);
-              } catch (error) {
-                showError(error);
-              }
+              });
             },
           },
           "Save",
@@ -579,14 +584,12 @@ async function chooseFolder(root: HTMLElement): Promise<void> {
   const chosen = await open({ directory: true, multiple: false, title: "Capture folder" });
   if (typeof chosen !== "string") return;
 
-  try {
+  await queueSettingsWork(async () => {
     await api.setCaptureDir(chosen);
     view = await api.getSettings();
     draw(root);
     toast("Capture folder updated.");
-  } catch (error) {
-    showError(error);
-  }
+  });
 }
 
 async function trigger(action: Parameters<typeof api.runAction>[0]): Promise<void> {

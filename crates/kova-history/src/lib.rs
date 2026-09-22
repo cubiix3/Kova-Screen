@@ -58,6 +58,7 @@ impl CaptureKind {
 pub enum UploadState {
     /// Never attempted.
     None,
+    Uploading,
     Uploaded,
     Failed,
 }
@@ -66,6 +67,7 @@ impl UploadState {
     fn as_str(self) -> &'static str {
         match self {
             UploadState::None => "none",
+            UploadState::Uploading => "uploading",
             UploadState::Uploaded => "uploaded",
             UploadState::Failed => "failed",
         }
@@ -73,6 +75,7 @@ impl UploadState {
 
     fn parse(value: &str) -> Self {
         match value {
+            "uploading" => UploadState::Uploading,
             "uploaded" => UploadState::Uploaded,
             "failed" => UploadState::Failed,
             _ => UploadState::None,
@@ -173,6 +176,12 @@ impl History {
         connection
             .execute_batch(SCHEMA)
             .map_err(|e| Error::History(format!("could not create the history schema: {e}")))?;
+        connection
+            .execute(
+                "UPDATE captures SET upload_state = 'failed' WHERE upload_state = 'uploading'",
+                [],
+            )
+            .map_err(|e| Error::History(format!("could not reset interrupted uploads: {e}")))?;
 
         Ok(Self {
             connection: Mutex::new(connection),
@@ -210,6 +219,18 @@ impl History {
             .map_err(|e| Error::History(format!("could not record the capture: {e}")))?;
 
         Ok(connection.last_insert_rowid())
+    }
+
+    /// Keeps the row while the upload is in flight.
+    pub fn set_uploading(&self, id: i64) -> Result<()> {
+        let connection = self.connection.lock();
+        connection
+            .execute(
+                "UPDATE captures SET upload_state = ?1 WHERE id = ?2",
+                params![UploadState::Uploading.as_str(), id],
+            )
+            .map_err(|e| Error::History(format!("could not mark the upload as started: {e}")))?;
+        Ok(())
     }
 
     /// Marks a capture as uploaded and stores its links.
@@ -255,17 +276,22 @@ impl History {
 
     /// The most recent captures, newest first.
     pub fn recent(&self, limit: u32) -> Result<Vec<Entry>> {
+        self.recent_page(limit, 0)
+    }
+
+    /// A page of captures, newest first.
+    pub fn recent_page(&self, limit: u32, offset: u32) -> Result<Vec<Entry>> {
         let connection = self.connection.lock();
         let mut statement = connection
             .prepare(
                 "SELECT id, path, file_name, kind, created_at, size_bytes, width, height,
                         upload_state, page_url, direct_url, delete_url
-                 FROM captures ORDER BY created_at DESC, id DESC LIMIT ?1",
+                 FROM captures ORDER BY created_at DESC, id DESC LIMIT ?1 OFFSET ?2",
             )
             .map_err(|e| Error::History(format!("could not read the history: {e}")))?;
 
         let rows = statement
-            .query_map(params![limit], row_to_entry)
+            .query_map(params![limit, offset], row_to_entry)
             .map_err(|e| Error::History(format!("could not read the history: {e}")))?;
 
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -337,9 +363,12 @@ impl History {
         let connection = self.connection.lock();
         let removed = connection
             .execute(
-                "DELETE FROM captures WHERE id NOT IN (
-                     SELECT id FROM captures ORDER BY created_at DESC, id DESC LIMIT ?1
-                 )",
+                "DELETE FROM captures WHERE upload_state NOT IN ('uploading', 'uploaded')
+                  AND id NOT IN (
+                     SELECT id FROM captures
+                     WHERE upload_state NOT IN ('uploading', 'uploaded')
+                     ORDER BY created_at DESC, id DESC LIMIT ?1
+                  )",
                 params![limit],
             )
             .map_err(|e| Error::History(format!("could not prune the history: {e}")))?;
@@ -355,8 +384,15 @@ impl History {
         let mut removed = 0;
         for entry in entries {
             if !entry.path.exists() {
-                self.remove(entry.id)?;
-                removed += 1;
+                let connection = self.connection.lock();
+                removed += connection
+                    .execute(
+                        "DELETE FROM captures WHERE id = ?1
+                         AND upload_state NOT IN ('uploading', 'uploaded')",
+                        params![entry.id],
+                    )
+                    .map_err(|e| Error::History(format!("could not forget a missing file: {e}")))?
+                    as u32;
             }
         }
         Ok(removed)
@@ -473,6 +509,36 @@ mod tests {
         }
         assert_eq!(history.recent(3).unwrap().len(), 3);
         assert_eq!(history.recent(100).unwrap().len(), 10);
+    }
+
+    #[test]
+    fn recent_pages_reach_older_uploads() {
+        let history = history();
+        let oldest = history
+            .insert(&new_entry("oldest.png", CaptureKind::Screenshot))
+            .unwrap();
+        history
+            .set_uploaded(
+                oldest,
+                "https://vgy.me/oldest",
+                "https://i.vgy.me/oldest.png",
+                Some("https://vgy.me/delete/oldest"),
+            )
+            .unwrap();
+        for i in 0..4 {
+            history
+                .insert(&new_entry(
+                    &format!("newer-{i}.png"),
+                    CaptureKind::Screenshot,
+                ))
+                .unwrap();
+        }
+        let first = history.recent_page(2, 0).unwrap();
+        let last = history.recent_page(2, 4).unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0].id, oldest);
+        assert!(last[0].delete_url.is_some());
     }
 
     #[test]
@@ -646,6 +712,47 @@ mod tests {
     }
 
     #[test]
+    fn pruning_retains_uploads_until_the_online_copy_is_deleted() {
+        let history = history();
+        let uploaded = history
+            .insert(&new_entry("uploaded.png", CaptureKind::Screenshot))
+            .unwrap();
+        history
+            .set_uploaded(
+                uploaded,
+                "https://vgy.me/uploaded",
+                "https://i.vgy.me/uploaded.png",
+                Some("https://vgy.me/delete/uploaded"),
+            )
+            .unwrap();
+        let uploading = history
+            .insert(&new_entry("uploading.png", CaptureKind::Screenshot))
+            .unwrap();
+        history.set_uploading(uploading).unwrap();
+        for i in 0..3 {
+            history
+                .insert(&new_entry(
+                    &format!("normal-{i}.png"),
+                    CaptureKind::Screenshot,
+                ))
+                .unwrap();
+        }
+
+        assert_eq!(history.prune(1).unwrap(), 2);
+        assert_eq!(history.count().unwrap(), 3);
+        assert!(history.get(uploaded).unwrap().unwrap().delete_url.is_some());
+        assert_eq!(
+            history.get(uploading).unwrap().unwrap().upload_state,
+            UploadState::Uploading
+        );
+
+        history.clear_upload(uploaded).unwrap();
+        history.set_upload_failed(uploading).unwrap();
+        assert_eq!(history.prune(1).unwrap(), 2);
+        assert_eq!(history.count().unwrap(), 1);
+    }
+
+    #[test]
     fn pruning_with_no_limit_keeps_everything() {
         let history = history();
         for i in 0..5 {
@@ -704,6 +811,38 @@ mod tests {
     }
 
     #[test]
+    fn missing_uploaded_files_keep_their_deletion_links() {
+        let path = std::env::temp_dir().join(format!(
+            "kova-history-missing-upload-{}.png",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let history = history();
+        let id = history
+            .insert(&NewEntry {
+                path,
+                kind: CaptureKind::Screenshot,
+                size_bytes: 1,
+                width: 1,
+                height: 1,
+            })
+            .unwrap();
+        history
+            .set_uploaded(
+                id,
+                "https://vgy.me/missing",
+                "https://i.vgy.me/missing.png",
+                Some("https://vgy.me/delete/missing"),
+            )
+            .unwrap();
+
+        assert_eq!(history.forget_missing_files().unwrap(), 0);
+        assert!(history.get(id).unwrap().unwrap().delete_url.is_some());
+        history.clear_upload(id).unwrap();
+        assert_eq!(history.forget_missing_files().unwrap(), 1);
+    }
+
+    #[test]
     fn a_database_file_persists_across_reopen() {
         let path = std::env::temp_dir().join("kova-history-persist.db");
         for suffix in ["", "-wal", "-shm"] {
@@ -720,6 +859,35 @@ mod tests {
         let reopened = History::open(&path).unwrap();
         assert_eq!(reopened.get(id).unwrap().unwrap().file_name, "persist.png");
 
+        drop(reopened);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    #[test]
+    fn interrupted_uploads_become_retryable_after_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "kova-history-interrupted-{}.db",
+            std::process::id()
+        ));
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        let id = {
+            let history = History::open(&path).unwrap();
+            let id = history
+                .insert(&new_entry("interrupted.png", CaptureKind::Screenshot))
+                .unwrap();
+            history.set_uploading(id).unwrap();
+            id
+        };
+
+        let reopened = History::open(&path).unwrap();
+        assert_eq!(
+            reopened.get(id).unwrap().unwrap().upload_state,
+            UploadState::Failed
+        );
         drop(reopened);
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));

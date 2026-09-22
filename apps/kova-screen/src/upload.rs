@@ -19,6 +19,13 @@ use crate::notify;
 /// Never blocks the caller and never returns an error: everything is surfaced
 /// through a notification and the history row.
 pub fn spawn(state: Arc<AppState>, path: PathBuf, kind: MediaKind, history_id: Option<i64>) {
+    if let (Some(history), Some(id)) = (state.history(), history_id)
+        && let Err(err) = history.set_uploading(id)
+    {
+        tracing::warn!(%err, "could not mark the queued upload in history");
+    }
+    state.notify_history_changed();
+
     struct Job {
         state: Arc<AppState>,
         path: PathBuf,
@@ -53,6 +60,12 @@ pub fn spawn(state: Arc<AppState>, path: PathBuf, kind: MediaKind, history_id: O
         Err(_) => false,
     };
     if !queued {
+        if let (Some(history), Some(id)) = (state.history(), history_id)
+            && let Err(err) = history.set_upload_failed(id)
+        {
+            tracing::warn!(%err, "could not record the queued upload failure");
+        }
+        state.notify_history_changed();
         notify::show_if_enabled(
             &state.settings(),
             "Upload not started",
@@ -71,6 +84,13 @@ pub fn run(
 ) -> Result<UploadResult> {
     let settings = state.settings();
     let provider = state.provider();
+
+    if let (Some(history), Some(id)) = (state.history(), history_id)
+        && let Err(err) = history.set_uploading(id)
+    {
+        tracing::warn!(%err, "could not mark the upload in history");
+    }
+    state.notify_history_changed();
 
     let result = provider.upload(&crate::pipeline::upload_request(
         &settings,

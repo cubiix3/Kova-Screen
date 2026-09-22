@@ -17,8 +17,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   whole desktop first. An optional countdown runs before the selector.
 - A shutter sound, off by default.
 - Recent Captures can copy a screenshot as an image. Delete asks first. The
-  list reloads when a capture is saved and follows the history limit, up to
-  2000 rows.
+  list reloads when a capture is saved and loads older entries on demand.
 - Recordings store their dimensions. The saved-file notice says when a GIF was
   scaled down, when a region was trimmed to one display, and when Windows
   cannot hide the recorder overlay.
@@ -31,6 +30,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- Recent Captures shows thumbnails from the selected capture folder.
+- Local deletion and history cleanup keep uploaded entries and their online
+  deletion links. Deleting an online copy now asks for confirmation.
+- Rapid settings changes are saved in order instead of overwriting each other.
 - `settings.json` ignores fields it does not know, so a file written by a newer
   build no longer makes an older build fall back to defaults and silently reset
   every preference.

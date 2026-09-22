@@ -9,12 +9,17 @@
  */
 
 import { listen } from "@tauri-apps/api/event";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { api, describeError } from "./ipc";
 import type { Capture } from "./ipc";
 import { brandMark, formatDate, formatSize, h, render, toast } from "./dom";
 
 let captures: Capture[] = [];
 let busy: number | null = null;
+let hasMore = false;
+let loadingOlder = false;
+let generation = 0;
+const PAGE_SIZE = 100;
 
 export async function mountHistory(root: HTMLElement): Promise<void> {
   await reload(root);
@@ -24,8 +29,12 @@ export async function mountHistory(root: HTMLElement): Promise<void> {
 }
 
 async function reload(root: HTMLElement): Promise<void> {
+  const current = ++generation;
   try {
-    captures = await api.getHistory();
+    const page = await api.getHistory(PAGE_SIZE + 1, 0);
+    if (current !== generation) return;
+    captures = page.slice(0, PAGE_SIZE);
+    hasMore = page.length > PAGE_SIZE;
   } catch (error) {
     render(
       root,
@@ -35,6 +44,23 @@ async function reload(root: HTMLElement): Promise<void> {
     return;
   }
   draw(root);
+}
+
+async function loadOlder(root: HTMLElement): Promise<void> {
+  if (loadingOlder || !hasMore) return;
+  loadingOlder = true;
+  const current = generation;
+  try {
+    const page = await api.getHistory(PAGE_SIZE + 1, captures.length);
+    if (current !== generation) return;
+    captures.push(...page.slice(0, PAGE_SIZE));
+    hasMore = page.length > PAGE_SIZE;
+    draw(root);
+  } catch (error) {
+    toast(describeError(error), "error");
+  } finally {
+    loadingOlder = false;
+  }
 }
 
 function draw(root: HTMLElement): void {
@@ -50,7 +76,14 @@ function draw(root: HTMLElement): void {
             { class: "empty" },
             "No captures yet. Press Print Screen, then drag a region or click a window.",
           )
-        : h("div", { class: "history" }, ...captures.map((c) => row(root, c))),
+        : h(
+            "div",
+            { class: "history" },
+            ...captures.map((c) => row(root, c)),
+            hasMore
+              ? h("button", { disabled: loadingOlder, onClick: () => void loadOlder(root) }, "Load older")
+              : null,
+          ),
     ),
   );
 }
@@ -76,9 +109,10 @@ function toolbar(root: HTMLElement): HTMLElement {
       "button",
       {
         onClick: async () => {
-          const removed = await api.pruneMissing().catch(() => 0);
-          toast(removed > 0 ? `Forgot ${removed} missing file(s).` : "Nothing to clean up.");
-          await reload(root);
+          await run(root, async () => {
+            const removed = await api.pruneMissing();
+            toast(removed > 0 ? `Forgot ${removed} missing file(s).` : "Nothing to clean up.");
+          });
         },
       },
       "Clean up",
@@ -87,7 +121,7 @@ function toolbar(root: HTMLElement): HTMLElement {
 }
 
 function row(root: HTMLElement, capture: Capture): HTMLElement {
-  const isImage = capture.kind === "screenshot" || capture.kind === "gif";
+  const isImage = capture.local_exists && (capture.kind === "screenshot" || capture.kind === "gif");
   const disabled = busy !== null;
 
   const action = (label: string, run_: () => Promise<unknown>, className?: string) =>
@@ -121,20 +155,24 @@ function row(root: HTMLElement, capture: Capture): HTMLElement {
     h(
       "div",
       { class: "capture__actions" },
-      action("Open", () => api.openCapture(capture.id)),
-      action("Folder", () => api.revealCapture(capture.id)),
-      capture.kind === "screenshot"
+      capture.local_exists ? action("Open", () => api.openCapture(capture.id)) : null,
+      capture.local_exists ? action("Folder", () => api.revealCapture(capture.id)) : null,
+      capture.local_exists && capture.kind === "screenshot"
         ? action("Image", () =>
             api.copyCaptureImage(capture.id).then(() => toast("Image copied.")),
           )
         : null,
-      action("File", () => api.copyCaptureFile(capture.id).then(() => toast("File copied."))),
-      action("Path", () => api.copyCapturePath(capture.id).then(() => toast("Path copied."))),
+      capture.local_exists
+        ? action("File", () => api.copyCaptureFile(capture.id).then(() => toast("File copied.")))
+        : null,
+      capture.local_exists
+        ? action("Path", () => api.copyCapturePath(capture.id).then(() => toast("Path copied.")))
+        : null,
       capture.upload_state === "uploaded"
         ? action("URL", () =>
             api.copyCaptureUrl(capture.id).then(() => toast("Link copied.")),
           )
-        : capture.kind === "video"
+        : !capture.local_exists || capture.kind === "video" || capture.upload_state === "uploading"
           ? null
           : action(busy === capture.id ? "Uploading…" : "Upload", async () => {
               busy = capture.id;
@@ -142,25 +180,46 @@ function row(root: HTMLElement, capture: Capture): HTMLElement {
               const url = await api.uploadCapture(capture.id);
               toast(`Uploaded: ${url}`);
             }),
-      capture.upload_state === "uploaded"
+      capture.can_delete_online
         ? action(
             "Delete online",
-            () =>
-              api
-                .deleteCaptureUpload(capture.id)
-                .then(() => toast("Online copy deleted.")),
+            async () => {
+              if (!window.confirm(`Delete the online copy of ${capture.file_name}?`)) return;
+              busy = capture.id;
+              draw(root);
+              await api.deleteCaptureUpload(capture.id);
+              toast("Online copy deleted.");
+            },
             "danger",
           )
         : null,
-      action(
-        "Delete",
-        async () => {
-          if (!window.confirm(`Delete ${capture.file_name}?`)) return;
-          await api.deleteCaptureFile(capture.id);
-          toast("Deleted.");
-        },
-        "danger",
-      ),
+      capture.local_exists
+        ? action(
+            "Delete",
+            async () => {
+              if (!window.confirm(`Delete ${capture.file_name}?`)) return;
+              await api.deleteCaptureFile(capture.id);
+              toast(capture.upload_state === "uploaded"
+                ? "Local file deleted. The online copy remains in Recent Captures."
+                : "Deleted.");
+            },
+            "danger",
+          )
+        : null,
+      !capture.local_exists
+        ? action(
+            "Forget",
+            async () => {
+              const warning = capture.upload_state === "uploaded"
+                ? "The online copy will remain, and Kova Screen will lose its deletion link."
+                : "";
+              if (!window.confirm(`Forget ${capture.file_name}? ${warning}`)) return;
+              await api.forgetCapture(capture.id);
+              toast("Capture forgotten.");
+            },
+            "danger",
+          )
+        : null,
     ),
   );
 }
@@ -177,7 +236,7 @@ function thumbnail(capture: Capture): HTMLElement {
     alt: "",
     loading: "lazy",
     decoding: "async",
-    src: assetUrl(capture.path),
+    src: convertFileSrc(capture.path),
     onError: () => img.replaceWith(placeholder(capture)),
   }) as HTMLImageElement;
   return img;
@@ -191,15 +250,15 @@ function placeholder(capture: Capture): HTMLElement {
   );
 }
 
-/** Builds the `asset:` URL the WebView can load a local file from. */
-function assetUrl(path: string): string {
-  // Tauri exposes local files under a custom scheme; the path has to be encoded
-  // because Windows paths contain backslashes, colons and spaces.
-  return `http://asset.localhost/${encodeURIComponent(path)}`;
-}
-
 function uploadBadge(capture: Capture): HTMLElement | string {
+  if (!capture.local_exists) {
+    return h("span", { class: "badge" }, capture.upload_state === "uploaded"
+      ? "Uploaded · local file removed"
+      : "Local file removed");
+  }
   switch (capture.upload_state) {
+    case "uploading":
+      return h("span", { class: "badge" }, "Uploading");
     case "uploaded":
       return h("span", { class: "badge uploaded" }, "Uploaded");
     case "failed":

@@ -14,7 +14,7 @@ export type UrlKind = "direct-image" | "page-url";
 export type Theme = "dark" | "light" | "system";
 export type RecordingQuality = "low" | "medium" | "high";
 export type CaptureKind = "screenshot" | "gif" | "video";
-export type UploadState = "none" | "uploaded" | "failed";
+export type UploadState = "none" | "uploading" | "uploaded" | "failed";
 
 export interface GeneralSettings {
   launch_with_windows: boolean;
@@ -111,6 +111,8 @@ export interface Capture {
   upload_state: UploadState;
   page_url: string | null;
   direct_url: string | null;
+  local_exists: boolean;
+  can_delete_online: boolean;
   /* `delete_url` is deliberately not serialised by the backend. */
 }
 
@@ -132,7 +134,7 @@ export const api = {
   testUserKey: () => invoke<string>("test_user_key"),
   setCaptureDir: (dir: string) => invoke<string>("set_capture_dir", { dir }),
 
-  getHistory: (limit?: number) => invoke<Capture[]>("get_history", { limit }),
+  getHistory: (limit?: number, offset?: number) => invoke<Capture[]>("get_history", { limit, offset }),
   openCapture: (id: number) => invoke<void>("open_capture", { id }),
   revealCapture: (id: number) => invoke<void>("reveal_capture", { id }),
   openCaptureFolder: () => invoke<void>("open_capture_folder"),
@@ -143,6 +145,7 @@ export const api = {
   copyCaptureUrl: (id: number) => invoke<void>("copy_capture_url", { id }),
   uploadCapture: (id: number) => invoke<string>("upload_capture", { id }),
   deleteCaptureFile: (id: number) => invoke<void>("delete_capture_file", { id }),
+  forgetCapture: (id: number) => invoke<void>("forget_capture", { id }),
   deleteCaptureUpload: (id: number) =>
     invoke<void>("delete_capture_upload", { id }),
   pruneMissing: () => invoke<number>("prune_missing"),

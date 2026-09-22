@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use kova_history::Entry;
+use kova_history::{Entry, UploadState};
 use kova_screen_core::settings::Settings;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
@@ -171,8 +171,21 @@ pub fn test_user_key() -> CmdResult<String> {
 }
 
 /// Recent captures for the history window.
+#[derive(serde::Serialize)]
+pub struct HistoryEntryView {
+    #[serde(flatten)]
+    entry: Entry,
+    local_exists: bool,
+    can_delete_online: bool,
+}
+
 #[tauri::command]
-pub fn get_history(state: State<'_, Arc<AppState>>, limit: Option<u32>) -> CmdResult<Vec<Entry>> {
+pub fn get_history(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> CmdResult<Vec<HistoryEntryView>> {
     let Some(history) = state.history() else {
         return Err(state
             .history_error()
@@ -180,16 +193,36 @@ pub fn get_history(state: State<'_, Arc<AppState>>, limit: Option<u32>) -> CmdRe
             .to_string());
     };
     let configured = state.settings().storage.history_limit;
-    // Unlimited history still has to fit in the window. Two thousand rows is
-    // the list; the database keeps whatever the setting asked for.
     let cap = if configured == 0 {
         2000
     } else {
         configured.min(2000)
     };
-    history
-        .recent(limit.unwrap_or(cap).min(2000))
-        .map_err(describe)
+    let entries = history
+        .recent_page(limit.unwrap_or(cap).min(2000), offset.unwrap_or(0))
+        .map_err(describe)?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| {
+            let local_exists = entry.path.is_file();
+            let scope = app.asset_protocol_scope();
+            if local_exists
+                && matches!(
+                    entry.kind,
+                    kova_history::CaptureKind::Screenshot | kova_history::CaptureKind::Gif
+                )
+                && !scope.is_allowed(&entry.path)
+                && let Err(err) = scope.allow_file(&entry.path)
+            {
+                tracing::warn!(%err, "could not allow a capture thumbnail");
+            }
+            HistoryEntryView {
+                local_exists,
+                can_delete_online: entry.delete_url.is_some(),
+                entry,
+            }
+        })
+        .collect())
 }
 
 /// Looks a capture up by id, which is the only way this module accepts a path.
@@ -308,9 +341,32 @@ pub async fn upload_capture(state: State<'_, Arc<AppState>>, id: i64) -> CmdResu
 pub fn delete_capture_file(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<()> {
     let entry = entry_of(&state, id)?;
 
+    if entry.upload_state == UploadState::Uploading {
+        return Err("Wait for the upload to finish before deleting this file.".into());
+    }
+
     // A file that is already gone is the desired end state, not an error.
     if entry.path.exists() {
         std::fs::remove_file(&entry.path).map_err(|e| format!("Could not delete the file: {e}"))?;
+    }
+    if let Some(history) = state.history()
+        && entry.upload_state != UploadState::Uploaded
+    {
+        history.remove(id).map_err(describe)?;
+    }
+    state.notify_history_changed();
+    Ok(())
+}
+
+/// Forgets a capture whose local file is already gone.
+#[tauri::command]
+pub fn forget_capture(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<()> {
+    let entry = entry_of(&state, id)?;
+    if entry.path.exists() {
+        return Err("Delete the local file before forgetting this capture.".into());
+    }
+    if entry.upload_state == UploadState::Uploading {
+        return Err("Wait for the upload to finish before forgetting this capture.".into());
     }
     if let Some(history) = state.history() {
         history.remove(id).map_err(describe)?;
@@ -351,6 +407,9 @@ pub async fn delete_capture_upload(state: State<'_, Arc<AppState>>, id: i64) -> 
 
         if let Some(history) = state.history() {
             history.clear_upload(id).map_err(describe)?;
+            if !entry.path.exists() {
+                history.remove(id).map_err(describe)?;
+            }
         }
         state.notify_history_changed();
         Ok(())
@@ -449,6 +508,7 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sy
         copy_capture_url,
         upload_capture,
         delete_capture_file,
+        forget_capture,
         delete_capture_upload,
         prune_missing,
         set_capture_dir,
@@ -500,6 +560,32 @@ mod tests {
             !json.contains("user_key\":\""),
             "a key value was serialised"
         );
+    }
+
+    #[test]
+    fn the_history_view_exposes_deletion_capability_without_its_link() {
+        let view = HistoryEntryView {
+            entry: Entry {
+                id: 1,
+                path: PathBuf::from(r"C:\captures\one.png"),
+                file_name: "one.png".into(),
+                kind: kova_history::CaptureKind::Screenshot,
+                created_at: 0,
+                size_bytes: 1,
+                width: 1,
+                height: 1,
+                upload_state: UploadState::Uploaded,
+                page_url: Some("https://vgy.me/one".into()),
+                direct_url: Some("https://i.vgy.me/one.png".into()),
+                delete_url: Some("https://vgy.me/delete/secret".into()),
+            },
+            local_exists: false,
+            can_delete_online: true,
+        };
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(json.contains("\"can_delete_online\":true"));
+        assert!(!json.contains("delete/secret"));
+        assert!(!json.contains("delete_url"));
     }
 
     #[test]
