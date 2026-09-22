@@ -103,12 +103,26 @@ impl AppState {
         self.settings.read().clone()
     }
 
-    /// Replaces the settings and persists them.
-    pub fn save_settings(&self, mut settings: Settings) -> Result<()> {
-        settings.normalize();
-        settings.save()?;
-        *self.settings.write() = settings;
-        Ok(())
+    /// Replaces the settings and persists them, returning the previous ones.
+    ///
+    /// The write lock is held across the file write, so two saves cannot
+    /// share the temporary file or leave memory and disk disagreeing.
+    pub fn save_settings(&self, settings: Settings) -> Result<Settings> {
+        self.update_settings(|current| *current = settings)
+    }
+
+    /// Edits the current settings in place and persists the result, returning
+    /// the settings as they were before.
+    ///
+    /// The read, the edit and the write happen under one lock, so a concurrent
+    /// save cannot be lost between them.
+    pub fn update_settings(&self, edit: impl FnOnce(&mut Settings)) -> Result<Settings> {
+        let mut current = self.settings.write();
+        let mut next = current.clone();
+        edit(&mut next);
+        next.normalize();
+        next.save()?;
+        Ok(std::mem::replace(&mut *current, next))
     }
 
     pub fn history(&self) -> Option<Arc<History>> {

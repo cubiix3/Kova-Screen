@@ -151,8 +151,23 @@ fn finish_still(
 ) -> Result<CaptureOutcome> {
     let format = settings.capture.format;
 
-    // Encoding is the second and last step that can fail the whole capture.
-    let encoded = encode_still(&bitmap, format, settings.capture.quality)?;
+    // PNG is what non-Windows-native apps read from the clipboard. When the
+    // output format is something else, that second encode runs beside the
+    // first rather than after it, so the clipboard is not a full encode late.
+    let clipboard_png = settings.capture.copy_to_clipboard && format != ImageFormat::Png;
+    let (encoded, clipboard_png) = std::thread::scope(|scope| {
+        let png =
+            clipboard_png.then(|| scope.spawn(|| encode_still(&bitmap, ImageFormat::Png, 100)));
+        // Encoding is the second and last step that can fail the whole capture.
+        let encoded = encode_still(&bitmap, format, settings.capture.quality);
+        let png = png.map(|worker| {
+            worker
+                .join()
+                .unwrap_or_else(|_| Err(Error::Encode("the clipboard PNG encoder panicked".into())))
+        });
+        (encoded, png)
+    });
+    let encoded = encoded?;
 
     let mut outcome = CaptureOutcome {
         width: bitmap.width(),
@@ -170,20 +185,15 @@ fn finish_still(
 
     // --- Clipboard --------------------------------------------------------
     if settings.capture.copy_to_clipboard {
-        // PNG is what non-Windows-native apps read from the clipboard. Reuse the
-        // encoded bytes when the output format is already PNG, and skip the
-        // extra copy otherwise rather than compressing the image twice.
-        let png = if format == ImageFormat::Png {
-            encoded.clone()
-        } else {
-            match encode_still(&bitmap, ImageFormat::Png, 100) {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    // Losing the PNG costs the browsers and chat apps that prefer
-                    // it, so report it instead of silently copying DIBv5 only.
-                    tracing::warn!(%err, "could not encode a PNG for the clipboard");
-                    Vec::new()
-                }
+        // Reuse the encoded bytes when the output format is already PNG.
+        let png: &[u8] = match &clipboard_png {
+            None => &encoded,
+            Some(Ok(bytes)) => bytes,
+            Some(Err(err)) => {
+                // Losing the PNG costs the browsers and chat apps that prefer
+                // it, so report it instead of silently copying DIBv5 only.
+                tracing::warn!(%err, "could not encode a PNG for the clipboard");
+                &[]
             }
         };
         // Only advertise a file after saving succeeded. A failed save still
@@ -193,7 +203,7 @@ fn finish_still(
         } else {
             None
         };
-        match kova_platform::clipboard::set_image_with_file(&bitmap, &png, file) {
+        match kova_platform::clipboard::set_image_with_file(&bitmap, png, file) {
             Ok(()) => outcome.copied = true,
             Err(err) => outcome
                 .warnings
@@ -282,14 +292,13 @@ pub fn save_capture(settings: &Settings, data: &[u8], extension: &str) -> Result
             path: path.clone(),
             source,
         })?;
-    file.write_all(data).map_err(|source| Error::Storage {
-        path: path.clone(),
-        source,
-    })?;
-    file.flush().map_err(|source| Error::Storage {
-        path: path.clone(),
-        source,
-    })?;
+    if let Err(source) = file.write_all(data).and_then(|()| file.flush()) {
+        // A full disk would otherwise leave a truncated image that looks like
+        // a capture in the folder but will not open.
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(Error::Storage { path, source });
+    }
 
     Ok(path)
 }

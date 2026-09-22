@@ -32,6 +32,18 @@ fn describe(error: kova_screen_core::Error) -> String {
     error.to_string()
 }
 
+/// Runs file, database or image work off the main thread.
+///
+/// Tauri runs synchronous commands on the main thread, so a large image or a
+/// slow network folder would freeze every window and the tray until it ended.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> CmdResult<T> + Send + 'static,
+) -> CmdResult<T> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|err| format!("The background task failed: {err}"))?
+}
+
 /// Everything the settings window needs in one round trip.
 #[derive(serde::Serialize)]
 pub struct SettingsView {
@@ -89,7 +101,7 @@ pub fn save_settings(
 ) -> CmdResult<SettingsView> {
     // Reject a conflicting hotkey set before writing anything, so the user is
     // never left with a saved config that silently drops a binding.
-    let conflicts = settings.hotkeys.conflicts();
+    let conflicts = hotkey_conflicts(&settings.hotkeys);
     if let Some((a, b)) = conflicts.first() {
         return Err(format!(
             "{} and {} are bound to the same shortcut",
@@ -98,8 +110,7 @@ pub fn save_settings(
         ));
     }
 
-    let previous = state.settings();
-    state.save_settings(settings.clone()).map_err(describe)?;
+    let previous = state.save_settings(settings.clone()).map_err(describe)?;
 
     // Autostart is external state, so it is only touched when it changed.
     if previous.general.launch_with_windows != settings.general.launch_with_windows {
@@ -131,11 +142,25 @@ pub fn save_settings(
     get_settings(state)
 }
 
+/// Bindings that name the same shortcut once the platform parser has
+/// normalised modifier order and key aliases.
+fn hotkey_conflicts(
+    hotkeys: &kova_screen_core::settings::HotkeySettings,
+) -> Vec<(&'static str, &'static str)> {
+    hotkeys.conflicts_by(|binding| {
+        kova_platform::Hotkey::parse(binding)
+            .ok()
+            .map(kova_platform::Hotkey::to_binding)
+    })
+}
+
 fn humanise(action: &str) -> String {
     match action {
         "region_screenshot" => "Region screenshot".into(),
         "fullscreen_screenshot" => "Fullscreen screenshot".into(),
         "window_screenshot" => "Window screenshot".into(),
+        "all_monitors_screenshot" => "All displays screenshot".into(),
+        "repeat_last_region" => "Repeat last region".into(),
         "record_mp4" => "Record MP4".into(),
         "record_gif" => "Record GIF".into(),
         "stop_recording" => "Stop recording".into(),
@@ -180,49 +205,53 @@ pub struct HistoryEntryView {
 }
 
 #[tauri::command]
-pub fn get_history(
+pub async fn get_history(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     limit: Option<u32>,
     offset: Option<u32>,
 ) -> CmdResult<Vec<HistoryEntryView>> {
-    let Some(history) = state.history() else {
-        return Err(state
-            .history_error()
-            .unwrap_or("History is unavailable in this session.")
-            .to_string());
-    };
-    let configured = state.settings().storage.history_limit;
-    let cap = if configured == 0 {
-        2000
-    } else {
-        configured.min(2000)
-    };
-    let entries = history
-        .recent_page(limit.unwrap_or(cap).min(2000), offset.unwrap_or(0))
-        .map_err(describe)?;
-    Ok(entries
-        .into_iter()
-        .map(|entry| {
-            let local_exists = entry.path.is_file();
-            let scope = app.asset_protocol_scope();
-            if local_exists
-                && matches!(
-                    entry.kind,
-                    kova_history::CaptureKind::Screenshot | kova_history::CaptureKind::Gif
-                )
-                && !scope.is_allowed(&entry.path)
-                && let Err(err) = scope.allow_file(&entry.path)
-            {
-                tracing::warn!(%err, "could not allow a capture thumbnail");
-            }
-            HistoryEntryView {
-                local_exists,
-                can_delete_online: entry.delete_url.is_some(),
-                entry,
-            }
-        })
-        .collect())
+    let state = Arc::clone(state.inner());
+    blocking(move || {
+        let Some(history) = state.history() else {
+            return Err(state
+                .history_error()
+                .unwrap_or("History is unavailable in this session.")
+                .to_string());
+        };
+        let configured = state.settings().storage.history_limit;
+        let cap = if configured == 0 {
+            2000
+        } else {
+            configured.min(2000)
+        };
+        let entries = history
+            .recent_page(limit.unwrap_or(cap).min(2000), offset.unwrap_or(0))
+            .map_err(describe)?;
+        let scope = app.asset_protocol_scope();
+        Ok(entries
+            .into_iter()
+            .map(|entry| {
+                let local_exists = entry.path.is_file();
+                if local_exists
+                    && matches!(
+                        entry.kind,
+                        kova_history::CaptureKind::Screenshot | kova_history::CaptureKind::Gif
+                    )
+                    && !scope.is_allowed(&entry.path)
+                    && let Err(err) = scope.allow_file(&entry.path)
+                {
+                    tracing::warn!(%err, "could not allow a capture thumbnail");
+                }
+                HistoryEntryView {
+                    local_exists,
+                    can_delete_online: entry.delete_url.is_some(),
+                    entry,
+                }
+            })
+            .collect())
+    })
+    .await
 }
 
 /// Looks a capture up by id, which is the only way this module accepts a path.
@@ -275,22 +304,26 @@ pub fn copy_capture_file(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<
 
 /// Puts a saved screenshot on the clipboard as an image.
 #[tauri::command]
-pub fn copy_capture_image(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<()> {
-    let entry = entry_of(&state, id)?;
-    if entry.kind != kova_history::CaptureKind::Screenshot {
-        return Err("Copy the file for a GIF or a recording.".into());
-    }
-    if !entry.path.exists() {
-        return Err("That file no longer exists.".into());
-    }
-    let bitmap = kova_encode::still::decode_file(&entry.path).map_err(describe)?;
-    let png = kova_encode::still::encode_still(
-        &bitmap,
-        kova_screen_core::settings::ImageFormat::Png,
-        100,
-    )
-    .map_err(describe)?;
-    kova_platform::clipboard::set_image(&bitmap, &png).map_err(describe)
+pub async fn copy_capture_image(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<()> {
+    let state = Arc::clone(state.inner());
+    blocking(move || {
+        let entry = entry_of(&state, id)?;
+        if entry.kind != kova_history::CaptureKind::Screenshot {
+            return Err("Copy the file for a GIF or a recording.".into());
+        }
+        if !entry.path.exists() {
+            return Err("That file no longer exists.".into());
+        }
+        let bitmap = kova_encode::still::decode_file(&entry.path).map_err(describe)?;
+        let png = kova_encode::still::encode_still(
+            &bitmap,
+            kova_screen_core::settings::ImageFormat::Png,
+            100,
+        )
+        .map_err(describe)?;
+        kova_platform::clipboard::set_image(&bitmap, &png).map_err(describe)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -321,7 +354,7 @@ pub fn copy_capture_url(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<(
 #[tauri::command]
 pub async fn upload_capture(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<String> {
     let state = Arc::clone(state.inner());
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking(move || {
         let entry = entry_of(&state, id)?;
         let kind = kova_upload::MediaKind::from_path(&entry.path)
             .ok_or_else(|| "That file type cannot be uploaded.".to_string())?;
@@ -333,29 +366,33 @@ pub async fn upload_capture(state: State<'_, Arc<AppState>>, id: i64) -> CmdResu
         Ok(result.url_for(settings.upload.url_kind).to_string())
     })
     .await
-    .map_err(|err| format!("The upload worker failed: {err}"))?
 }
 
 /// Deletes the local file and forgets the row.
 #[tauri::command]
-pub fn delete_capture_file(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<()> {
-    let entry = entry_of(&state, id)?;
+pub async fn delete_capture_file(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<()> {
+    let state = Arc::clone(state.inner());
+    blocking(move || {
+        let entry = entry_of(&state, id)?;
 
-    if entry.upload_state == UploadState::Uploading {
-        return Err("Wait for the upload to finish before deleting this file.".into());
-    }
+        if entry.upload_state == UploadState::Uploading {
+            return Err("Wait for the upload to finish before deleting this file.".into());
+        }
 
-    // A file that is already gone is the desired end state, not an error.
-    if entry.path.exists() {
-        std::fs::remove_file(&entry.path).map_err(|e| format!("Could not delete the file: {e}"))?;
-    }
-    if let Some(history) = state.history()
-        && entry.upload_state != UploadState::Uploaded
-    {
-        history.remove(id).map_err(describe)?;
-    }
-    state.notify_history_changed();
-    Ok(())
+        // A file that is already gone is the desired end state, not an error.
+        if entry.path.exists() {
+            std::fs::remove_file(&entry.path)
+                .map_err(|e| format!("Could not delete the file: {e}"))?;
+        }
+        if let Some(history) = state.history()
+            && entry.upload_state != UploadState::Uploaded
+        {
+            history.remove(id).map_err(describe)?;
+        }
+        state.notify_history_changed();
+        Ok(())
+    })
+    .await
 }
 
 /// Forgets a capture whose local file is already gone.
@@ -396,7 +433,7 @@ pub fn open_releases(app: AppHandle) -> CmdResult<()> {
 #[tauri::command]
 pub async fn delete_capture_upload(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<()> {
     let state = Arc::clone(state.inner());
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking(move || {
         let entry = entry_of(&state, id)?;
         let delete_url = entry
             .delete_url
@@ -415,18 +452,21 @@ pub async fn delete_capture_upload(state: State<'_, Arc<AppState>>, id: i64) -> 
         Ok(())
     })
     .await
-    .map_err(|err| format!("The deletion worker failed: {err}"))?
 }
 
 /// Drops rows whose file the user removed outside the app.
 #[tauri::command]
-pub fn prune_missing(state: State<'_, Arc<AppState>>) -> CmdResult<u32> {
-    let Some(history) = state.history() else {
-        return Ok(0);
-    };
-    let removed = history.forget_missing_files().map_err(describe)?;
-    state.notify_history_changed();
-    Ok(removed)
+pub async fn prune_missing(state: State<'_, Arc<AppState>>) -> CmdResult<u32> {
+    let state = Arc::clone(state.inner());
+    blocking(move || {
+        let Some(history) = state.history() else {
+            return Ok(0);
+        };
+        let removed = history.forget_missing_files().map_err(describe)?;
+        state.notify_history_changed();
+        Ok(removed)
+    })
+    .await
 }
 
 /// Sets the capture directory after checking it is usable.
@@ -442,9 +482,9 @@ pub fn set_capture_dir(state: State<'_, Arc<AppState>>, dir: String) -> CmdResul
     // Fail here rather than at the moment of the user next screenshot.
     kova_screen_core::paths::ensure_dir(&path).map_err(describe)?;
 
-    let mut settings = state.settings();
-    settings.storage.capture_dir = Some(path.clone());
-    state.save_settings(settings).map_err(describe)?;
+    state
+        .update_settings(|settings| settings.storage.capture_dir = Some(path.clone()))
+        .map_err(describe)?;
 
     Ok(path.to_string_lossy().to_string())
 }
@@ -521,6 +561,7 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sy
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kova_screen_core::settings::HotkeySettings;
 
     #[test]
     fn no_command_returns_the_user_key() {
@@ -589,9 +630,27 @@ mod tests {
     }
 
     #[test]
+    fn hotkeys_that_differ_only_in_spelling_are_a_conflict() {
+        let hotkeys = HotkeySettings {
+            record_gif: "shift+Control+r".into(),
+            all_monitors_screenshot: "Shift+PrtSc".into(),
+            ..Default::default()
+        };
+        let conflicts = hotkey_conflicts(&hotkeys);
+        assert_eq!(conflicts.len(), 2, "{conflicts:?}");
+        assert!(hotkey_conflicts(&HotkeySettings::default()).is_empty());
+    }
+
+    #[test]
     fn hotkey_action_ids_get_readable_labels() {
         assert_eq!(humanise("region_screenshot"), "Region screenshot");
         assert_eq!(humanise("record_mp4"), "Record MP4");
+        for (id, _) in HotkeySettings::default().bindings() {
+            assert!(
+                humanise(id).starts_with(char::is_uppercase),
+                "{id} has no label"
+            );
+        }
         // An unknown id still reads as words rather than a raw identifier.
         assert_eq!(humanise("some_new_action"), "some new action");
     }

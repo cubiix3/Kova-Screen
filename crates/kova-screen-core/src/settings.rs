@@ -296,18 +296,32 @@ impl HotkeySettings {
     ///
     /// Reported to the user as a settings validation error instead of letting
     /// one binding silently win at registration time.
-    pub fn conflicts(&self) -> Vec<(&'static str, &'static str)> {
-        let bindings = self.bindings();
+    ///
+    /// Bindings are compared after `canonical` has normalised them, so
+    /// `Shift+Ctrl+R` and `Control+Shift+R` count as the same shortcut. A
+    /// binding that `canonical` rejects is compared by its trimmed,
+    /// case-folded text instead; registration reports it separately.
+    pub fn conflicts_by(
+        &self,
+        canonical: impl Fn(&str) -> Option<String>,
+    ) -> Vec<(&'static str, &'static str)> {
+        let keys: Vec<(&'static str, Option<String>)> = self
+            .bindings()
+            .into_iter()
+            .map(|(id, binding)| {
+                let binding = binding.trim();
+                let key = (!binding.is_empty())
+                    .then(|| canonical(binding).unwrap_or_else(|| binding.to_ascii_lowercase()));
+                (id, key)
+            })
+            .collect();
         let mut out = Vec::new();
-        for i in 0..bindings.len() {
-            for j in (i + 1)..bindings.len() {
-                let (a_id, a) = bindings[i];
-                let (b_id, b) = bindings[j];
-                if a.trim().is_empty() || b.trim().is_empty() {
-                    continue;
-                }
-                if a.eq_ignore_ascii_case(b.trim()) {
-                    out.push((a_id, b_id));
+        for (i, (a_id, a)) in keys.iter().enumerate() {
+            for (b_id, b) in &keys[i + 1..] {
+                if let (Some(a), Some(b)) = (a, b)
+                    && a == b
+                {
+                    out.push((*a_id, *b_id));
                 }
             }
         }
@@ -555,9 +569,42 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Stand-in for the platform parser: order-insensitive modifiers.
+    fn sorted_parts(binding: &str) -> Option<String> {
+        let mut parts: Vec<String> = binding
+            .split('+')
+            .map(|part| part.trim().to_ascii_lowercase().replace("control", "ctrl"))
+            .collect();
+        parts.sort();
+        Some(parts.join("+"))
+    }
+
     #[test]
     fn default_hotkeys_do_not_conflict() {
-        assert!(HotkeySettings::default().conflicts().is_empty());
+        assert!(
+            HotkeySettings::default()
+                .conflicts_by(sorted_parts)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn reordered_or_aliased_modifiers_still_conflict() {
+        let hk = HotkeySettings {
+            record_gif: " Shift+Control+R".into(),
+            ..Default::default()
+        };
+        assert_eq!(hk.conflicts_by(sorted_parts).len(), 1);
+    }
+
+    #[test]
+    fn an_unparseable_binding_falls_back_to_its_text() {
+        let hk = HotkeySettings {
+            record_mp4: "Ctrl+Nope".into(),
+            record_gif: "ctrl+nope ".into(),
+            ..Default::default()
+        };
+        assert_eq!(hk.conflicts_by(|_| None).len(), 1);
     }
 
     #[test]
@@ -566,7 +613,7 @@ mod tests {
             record_gif: "Ctrl+Shift+R".into(),
             ..Default::default()
         };
-        let conflicts = hk.conflicts();
+        let conflicts = hk.conflicts_by(sorted_parts);
         assert_eq!(conflicts.len(), 1);
         assert!(conflicts[0].0 == "record_mp4" || conflicts[0].1 == "record_mp4");
     }
@@ -578,7 +625,7 @@ mod tests {
             record_mp4: String::new(),
             ..Default::default()
         };
-        assert!(hk.conflicts().is_empty());
+        assert!(hk.conflicts_by(sorted_parts).is_empty());
     }
 
     #[test]

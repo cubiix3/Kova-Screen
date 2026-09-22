@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The Settings and Recent Captures windows: history reload events and the capture-folder picker. Nothing else from the plugins is reachable from the WebView.",
+  "windows": ["settings", "history"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "dialog:allow-open"
+  ]
+}

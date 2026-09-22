@@ -41,7 +41,8 @@ pub fn spawn(state: Arc<AppState>, path: PathBuf, kind: MediaKind, history_id: O
             .name("kova-upload".into())
             .spawn(move || {
                 while let Ok(job) = receiver.recv() {
-                    let outcome = run(&job.state, job.path, job.kind, job.history_id);
+                    // `spawn` already marked the row when it was queued.
+                    let outcome = perform(&job.state, job.path, job.kind, job.history_id);
                     report(&job.state, job.kind, outcome);
                 }
             })
@@ -82,15 +83,24 @@ pub fn run(
     kind: MediaKind,
     history_id: Option<i64>,
 ) -> Result<UploadResult> {
-    let settings = state.settings();
-    let provider = state.provider();
-
     if let (Some(history), Some(id)) = (state.history(), history_id)
         && let Err(err) = history.set_uploading(id)
     {
         tracing::warn!(%err, "could not mark the upload in history");
     }
     state.notify_history_changed();
+    perform(state, path, kind, history_id)
+}
+
+/// The upload itself, for a row that is already marked as uploading.
+fn perform(
+    state: &Arc<AppState>,
+    path: PathBuf,
+    kind: MediaKind,
+    history_id: Option<i64>,
+) -> Result<UploadResult> {
+    let settings = state.settings();
+    let provider = state.provider();
 
     let result = provider.upload(&crate::pipeline::upload_request(
         &settings,
