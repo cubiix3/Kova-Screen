@@ -28,7 +28,8 @@ secrets.json
 *.pem
 *.key
 
-# Editors / OS
+# Editors / OS / local agent state
+.commandcode/
 .vscode/*
 !.vscode/extensions.json
 .idea/

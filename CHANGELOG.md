@@ -27,9 +27,28 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Changed
 
 - MP4 files are no longer offered for upload. vgy.me does not accept them.
+- GIF frames are quantised on their own thread behind a two-frame queue, so a
+  slow frame no longer delays the next capture. Memory stays bounded; a frame
+  that arrives while the queue is full is dropped and the previous one stays on
+  screen longer.
+- A JPEG or WebP screenshot encodes the clipboard PNG alongside the file
+  instead of after it.
+- Loading Recent Captures, copying an image from it, deleting a file and
+  pruning missing files run off the main thread, so a large image or a slow
+  folder no longer freezes the windows and the tray.
 
 ### Fixed
 
+- The capture-folder picker and the Recent Captures auto-reload have the
+  WebView permissions Tauri requires for them.
+- Hotkeys that differ only in modifier order or key alias, such as
+  `Shift+Ctrl+R` and `Control+Shift+R`, are reported as a conflict instead of
+  one silently failing to register. The conflict message names the
+  all-displays and repeat-region actions properly.
+- A screenshot that could not be written completely no longer leaves a
+  truncated file in the capture folder.
+- Settings saved at the same moment from two places can no longer overwrite
+  each other or share a temporary file.
 - Recent Captures shows thumbnails from the selected capture folder.
 - Local deletion and history cleanup keep uploaded entries and their online
   deletion links. Deleting an online copy now asks for confirmation.
@@ -53,8 +72,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - The CI token can read the repository and write its own cache and artifacts.
 - A saved upload key is copied out of Credential Manager before that record is
   freed. The selection dim no longer writes through a raw bitmap pointer.
-- Library tests link the Windows common-controls manifest, so the test program
-  can start on a clean machine.
+- The library tests start on a clean machine because comctl32 is delay-loaded,
+  replacing the prebuilt compiler wrapper the repository used to ship. Every
+  `unsafe` block is now required by Clippy to state its safety invariant.
 
 ## [0.1.3] - 2026-09-14
 
