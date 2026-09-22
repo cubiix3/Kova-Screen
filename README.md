@@ -16,9 +16,8 @@ Hotkey  →  select  →  capture  →  save  →  clipboard  →  (optional) up
 No image editor. No OCR. No account. No cloud. It takes screenshots, quickly.
 
 The [latest release](https://github.com/cubiix3/Kova-Screen/releases/latest) is
-**0.1.3**. This page describes the current source. The selector, the extra
-recording targets and the history changes below are in
-[Unreleased](CHANGELOG.md#unreleased) and ship with the next release.
+**0.1.4**. This page describes the current source; see
+[CHANGELOG.md](CHANGELOG.md) for what changed since.
 
 ---
 
@@ -230,7 +229,7 @@ the UI.
 
 ## Roadmap
 
-Shipped through 0.1.3: the capture, recording, clipboard and upload described
+Shipped through 0.1.4: the capture, recording, clipboard and upload described
 in that release. See [CHANGELOG.md](CHANGELOG.md).
 
 Being considered, in no committed order:
