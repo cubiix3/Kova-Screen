@@ -29,6 +29,22 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - MP4 files are no longer offered for upload. vgy.me does not accept them.
 
+### Fixed
+
+- `settings.json` ignores fields it does not know, so a file written by a newer
+  build no longer makes an older build fall back to defaults and silently reset
+  every preference.
+- A window capture no longer keeps Window's composited alpha, which could paste
+  as transparent holes; WGC frames are forced opaque like the GDI path.
+- A clipboard copy that placed the image but could not add the PNG or file
+  format is no longer reported as a failed copy; the optional formats are
+  logged instead.
+- A failed PNG encode for a non-PNG capture is logged rather than silently
+  copying DIBv5 only.
+- A rejected upload now shows vgy.me's own explanation. The HTTP client treated
+  any non-2xx status as an unreachable server and discarded the response body,
+  so a refused GIF read as "could not reach vgy.me" instead of the real reason.
+
 ### Security
 
 - The CI token can read the repository and write its own cache and artifacts.
