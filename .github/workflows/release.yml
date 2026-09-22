@@ -26,13 +26,13 @@ jobs:
     name: Build and publish
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
@@ -103,14 +103,14 @@ jobs:
           Get-Content SHA256SUMS.txt
           Pop-Location
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: kova-screen-${{ github.event.inputs.tag || github.ref_name }}
           path: artifacts/*
           if-no-files-found: error
 
       - name: Publish the GitHub release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: Kova Screen ${{ github.event.inputs.tag || github.ref_name }}
