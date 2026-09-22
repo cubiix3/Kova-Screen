@@ -176,7 +176,15 @@ fn finish_still(
         let png = if format == ImageFormat::Png {
             encoded.clone()
         } else {
-            encode_still(&bitmap, ImageFormat::Png, 100).unwrap_or_default()
+            match encode_still(&bitmap, ImageFormat::Png, 100) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    // Losing the PNG costs the browsers and chat apps that prefer
+                    // it, so report it instead of silently copying DIBv5 only.
+                    tracing::warn!(%err, "could not encode a PNG for the clipboard");
+                    Vec::new()
+                }
+            }
         };
         // Only advertise a file after saving succeeded. A failed save still
         // leaves the image available on the clipboard.

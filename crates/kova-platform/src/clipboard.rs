@@ -167,8 +167,15 @@ pub fn set_image(bitmap: &Bitmap, png: &[u8]) -> Result<()> {
 pub fn set_image_with_file(bitmap: &Bitmap, png: &[u8], file: Option<&Path>) -> Result<()> {
     let dib = build_dibv5(bitmap)?;
     // Built before the clipboard is opened: every other application on the
-    // desktop blocks while we hold it.
-    let hdrop = file.map(build_hdrop).transpose()?;
+    // desktop blocks while we hold it. A path that cannot become a drop list
+    // must not cost the user the image, so this stays best effort.
+    let hdrop = match file.map(build_hdrop).transpose() {
+        Ok(hdrop) => hdrop,
+        Err(err) => {
+            tracing::warn!(%err, "the file clipboard payload could not be built");
+            None
+        }
+    };
 
     let _guard = ClipboardGuard::open()?;
 
@@ -176,16 +183,29 @@ pub fn set_image_with_file(bitmap: &Bitmap, png: &[u8], file: Option<&Path>) -> 
     unsafe { EmptyClipboard() }
         .map_err(|e| Error::Clipboard(format!("could not clear the clipboard: {e}")))?;
 
+    // CF_DIBV5 is the payload that makes the image pasteable at all, so it is
+    // the only one whose failure fails the copy. Windows synthesises CF_DIB and
+    // CF_BITMAP from it for legacy consumers.
     GlobalBlock::build(dib.len(), |dest| dest.copy_from_slice(&dib))?.commit(CF_DIBV5)?;
 
-    // PNG is a registered format, so it must be looked up rather than hard-coded.
-    if !png.is_empty() {
-        let png_format = register_format("PNG")?;
-        GlobalBlock::build(png.len(), |dest| dest.copy_from_slice(png))?.commit(png_format)?;
+    // PNG and CF_HDROP are extras: they widen which applications can read the
+    // capture, but the image is already on the clipboard without them, so a
+    // failure here is logged rather than reported as a failed copy.
+    if !png.is_empty()
+        // PNG is a registered format, so it must be looked up rather than hard-coded.
+        && let Err(err) = register_format("PNG").and_then(|format| {
+            GlobalBlock::build(png.len(), |dest| dest.copy_from_slice(png))
+                .and_then(|block| block.commit(format))
+        })
+    {
+        tracing::warn!(%err, "the PNG clipboard format could not be added");
     }
 
-    if let Some(hdrop) = hdrop {
-        GlobalBlock::build(hdrop.len(), |dest| dest.copy_from_slice(&hdrop))?.commit(CF_HDROP)?;
+    if let Some(hdrop) = hdrop
+        && let Err(err) = GlobalBlock::build(hdrop.len(), |dest| dest.copy_from_slice(&hdrop))
+            .and_then(|block| block.commit(CF_HDROP))
+    {
+        tracing::warn!(%err, "the file clipboard format could not be added");
     }
 
     Ok(())
@@ -473,6 +493,22 @@ mod tests {
         set_image(&bmp, png).unwrap();
         assert!(!has_format(CF_HDROP));
         assert!(has_format(CF_DIBV5));
+    }
+
+    #[test]
+    fn an_unreadable_file_path_does_not_sink_the_image_copy() {
+        let _serialised = CLIPBOARD_TEST_LOCK.lock();
+        let bmp = sample(8, 8);
+        let png = b"\x89PNG\r\n\x1a\n";
+        // An empty path cannot become a drop list, but the image must still land:
+        // the file payload is an extra, not a precondition.
+        set_image_with_file(&bmp, png, Some(Path::new(""))).unwrap();
+        assert!(has_format(CF_DIBV5), "the image was lost with the bad path");
+        assert!(has_format(register_format("PNG").unwrap()));
+        assert!(
+            !has_format(CF_HDROP),
+            "a broken path must not publish a file"
+        );
     }
 
     #[test]
