@@ -677,7 +677,8 @@ mod tests {
     fn mouse_messages_update_hover_and_dispatch_the_matching_button() {
         kova_capture::require_interactive_desktop!();
         use windows::Win32::UI::WindowsAndMessaging::{
-            GetCursorPos, GetWindowRect, SendMessageW, SetCursorPos,
+            GetCursorPos, GetWindowRect, HWND_TOPMOST, SWP_NOACTIVATE, SendMessageW, SetCursorPos,
+            SetWindowPos, WindowFromPoint,
         };
         struct RestoreCursor(windows::Win32::Foundation::POINT);
         impl Drop for RestoreCursor {
@@ -692,27 +693,98 @@ mod tests {
             GetCursorPos(&mut previous).unwrap();
         }
         let _restore = RestoreCursor(previous);
+
         let mut overlay = RecorderOverlay::show().unwrap();
         let hwnd = find_overlay_window().unwrap();
+
+        // The default position follows the cursor's monitor and can land under
+        // the taskbar or another topmost window. The OS would then not see the
+        // overlay as the window under the cursor, and the TrackMouseEvent the
+        // handler arms would fire WM_MOUSELEAVE at once, resetting the hover we
+        // are about to assert. Park the overlay somewhere we control instead.
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                200,
+                200,
+                WIDTH,
+                HEIGHT,
+                SWP_NOACTIVATE,
+            )
+            .unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(50));
+
         let state = overlay.state();
+        // Guard against another test's window still being alive: the message
+        // would update *its* state and this test would see nothing.
+        // SAFETY: the window is live and was created with this state pointer.
+        let owner = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const RecorderState;
+        assert_eq!(
+            owner,
+            Arc::as_ptr(&state),
+            "find_overlay_window returned a different overlay"
+        );
         let mut bounds = RECT::default();
         unsafe {
             GetWindowRect(hwnd, &mut bounds).unwrap();
         }
+
         for (x, id) in [(PAUSE_X + 8, 1), (STOP_X + 8, 2)] {
-            // Real cursor placement prevents TrackMouseEvent immediately
-            // delivering WM_MOUSELEAVE for synthetic moves outside the window.
-            unsafe {
-                SetCursorPos(bounds.left + x, bounds.top + 20).unwrap();
+            let target = windows::Win32::Foundation::POINT {
+                x: bounds.left + x,
+                y: bounds.top + 20,
+            };
+            // Warp the real cursor onto the button and confirm both that it
+            // landed and that the OS sees our window under it. Warping is not
+            // always immediate, so retry rather than assume.
+            let mut on_target = false;
+            for _ in 0..20 {
+                unsafe {
+                    SetCursorPos(target.x, target.y).unwrap();
+                }
+                std::thread::sleep(Duration::from_millis(20));
+                let mut now = windows::Win32::Foundation::POINT::default();
+                unsafe {
+                    GetCursorPos(&mut now).unwrap();
+                }
+                // SAFETY: `target` is a live local.
+                let under = unsafe { WindowFromPoint(target) };
+                if under == hwnd
+                    && (bounds.left..bounds.right).contains(&now.x)
+                    && (bounds.top..bounds.bottom).contains(&now.y)
+                {
+                    on_target = true;
+                    break;
+                }
             }
-            // Let the OS deliver enter/leave events caused by cursor warping
-            // before testing the synchronously dispatched button message.
-            std::thread::sleep(Duration::from_millis(80));
+            assert!(
+                on_target,
+                "could not place the cursor over the overlay to test button {id}"
+            );
+            // Let the enter events the warp produced drain before dispatching.
+            std::thread::sleep(Duration::from_millis(50));
+
             let point = LPARAM(((20 << 16) | x) as isize);
-            unsafe {
-                SendMessageW(hwnd, WM_MOUSEMOVE, None, Some(point));
+            // The handler arms TrackMouseEvent on every move, and a cursor the
+            // OS does not consider inside the window makes it post a leave that
+            // races the synchronous update. Re-park the cursor right before each
+            // send and read until the hover is observed instead of assuming the
+            // OS routed it here on the first try.
+            let mut hovered = false;
+            for _ in 0..20 {
+                unsafe {
+                    SetCursorPos(target.x, target.y).unwrap();
+                    SendMessageW(hwnd, WM_MOUSEMOVE, None, Some(point));
+                }
+                if state.hovered.load(Ordering::Relaxed) == id {
+                    hovered = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
             }
-            assert_eq!(state.hovered.load(Ordering::Relaxed), id);
+            assert!(hovered, "WM_MOUSEMOVE never hovered button {id}");
             unsafe {
                 SendMessageW(hwnd, WM_LBUTTONDOWN, None, Some(point));
             }
