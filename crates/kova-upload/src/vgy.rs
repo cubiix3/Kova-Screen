@@ -72,6 +72,10 @@ impl VgyProvider {
             .timeout_connect(Some(CONNECT_TIMEOUT))
             .timeout_global(Some(RESPONSE_TIMEOUT))
             .max_redirects(MAX_REDIRECTS)
+            // ureq treats 4xx/5xx as an error and drops the body by default,
+            // which would hide vgy.me's own explanation. We want to read the
+            // status and the JSON body so a rejection can say *why*.
+            .http_status_as_error(false)
             .user_agent(concat!("KovaScreen/", env!("CARGO_PKG_VERSION")))
             .build();
 
@@ -218,6 +222,9 @@ pub fn visit_delete_url(url: &str) -> Result<()> {
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_global(Some(Duration::from_secs(30)))
         .max_redirects(MAX_REDIRECTS)
+        // See `with_endpoint`: the status is inspected below, so it must not
+        // first be turned into an opaque transport error.
+        .http_status_as_error(false)
         .user_agent(concat!("KovaScreen/", env!("CARGO_PKG_VERSION")))
         .build()
         .into();
@@ -682,15 +689,27 @@ mod tests {
     }
 
     #[test]
-    fn a_server_error_status_is_reported_with_its_code() {
-        let mut server = TestServer::start(500, "{}".to_string());
+    fn a_4xx_rejection_surfaces_the_server_message_not_a_transport_error() {
+        // ureq would otherwise turn a non-2xx status into an opaque error and
+        // drop the body, hiding exactly the reason the user needs when a GIF is
+        // refused. The full provider path must keep vgy.me's own words.
+        let json = r#"{"error":true,"messages":{"file":["The file is too large."]}}"#;
+        let mut server = TestServer::start(400, json.to_string());
         let provider = VgyProvider::with_endpoint(&server.endpoint()).unwrap();
-        let path = temp_file("fail.png", b"data");
+        let path = temp_file("clip.gif", b"GIF89a-fake-payload");
+
         let err = provider
             .upload(&request(path, None))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("500"), "the status code was lost: {err}");
+        assert!(
+            err.contains("The file is too large."),
+            "the server message was lost: {err}"
+        );
+        assert!(
+            !err.contains("could not reach"),
+            "a rejection must not read as unreachable: {err}"
+        );
         let _ = server.captured();
     }
 }
