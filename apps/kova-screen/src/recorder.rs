@@ -4,14 +4,17 @@
 //! producing paced frames, an encoder consuming them, and the native recorder
 //! overlay driving the timer and the Stop button.
 //!
-//! # Encoding happens on the capture thread
+//! # Back-pressure without unbounded queues
 //!
-//! The [`FrameSink`] encodes inline rather than queueing frames to a worker.
-//! A queue would be faster in a burst but would grow without bound whenever the
-//! encoder fell behind, and this app has to sit in the tray for days. Encoding
-//! inline makes back-pressure automatic: a slow encoder simply causes the
-//! session to skip ticks, which it already counts and handles, and memory stays
-//! at one frame regardless of how long the recording runs.
+//! This app has to sit in the tray for days, so no queue between capture and
+//! encoder may grow when the encoder falls behind.
+//!
+//! - MP4 frames go straight to the Media Foundation sink writer, which encodes
+//!   on its own threads.
+//! - GIF quantisation is the slow step, so it runs on a [`GifWorker`] behind a
+//!   two-frame queue. A frame that arrives while the queue is full is dropped;
+//!   GIF delays come from timestamps, so playback speed is unaffected and
+//!   memory stays at a few frames regardless of how long the recording runs.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use kova_capture::session::{CaptureSession, FrameSink, SessionOptions, SessionTarget};
-use kova_encode::gif::{GifOptions, GifRecorder};
+use kova_encode::gif::{GifOptions, GifRecorder, GifWorker};
 use kova_encode::mp4::{Mp4Options, Mp4Recorder};
 use kova_history::CaptureKind;
 use kova_platform::overlay::RecorderOverlay;
@@ -169,16 +172,25 @@ impl RecorderHandle {
                     },
                 )?))
             }
-            RecordingFormat::Gif => Encoder::Gif(Box::new(GifRecorder::create(
-                &path,
-                GifOptions {
-                    fps,
-                    max_width: (settings.recording.gif_max_width > 0)
-                        .then_some(settings.recording.gif_max_width),
-                    max_bytes: settings.recording.gif_max_size_mb as u64 * 1024 * 1024,
-                    quality: 10,
-                },
-            )?)),
+            RecordingFormat::Gif => {
+                let recorder = GifRecorder::create(
+                    &path,
+                    GifOptions {
+                        fps,
+                        max_width: (settings.recording.gif_max_width > 0)
+                            .then_some(settings.recording.gif_max_width),
+                        max_bytes: settings.recording.gif_max_size_mb as u64 * 1024 * 1024,
+                        quality: 10,
+                    },
+                )?;
+                match GifWorker::spawn(recorder) {
+                    Ok(worker) => Encoder::Gif(Box::new(worker)),
+                    Err(err) => {
+                        let _ = std::fs::remove_file(&path);
+                        return Err(err);
+                    }
+                }
+            }
         };
 
         let encoder = Arc::new(parking_lot::Mutex::new(Some(encoder)));
@@ -447,7 +459,7 @@ impl RecordingTarget {
 /// The encoder behind a recording.
 enum Encoder {
     Mp4(Box<Mp4Recorder>),
-    Gif(Box<GifRecorder>),
+    Gif(Box<GifWorker>),
 }
 
 /// Feeds captured frames into the encoder.
@@ -559,6 +571,8 @@ mod tests {
         use windows::Win32::System::Threading::*;
 
         fn snapshot(stage: &str) -> (u32, u32, f64) {
+            // SAFETY: queries on the current-process pseudo handle into live,
+            // correctly sized locals.
             unsafe {
                 let process = GetCurrentProcess();
                 let mut memory = PROCESS_MEMORY_COUNTERS_EX::default();

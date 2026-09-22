@@ -19,6 +19,9 @@
 //!    filling the disk.
 
 use std::io::{BufWriter, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use kova_screen_core::{Bitmap, Error, PixelFormat, Result};
@@ -109,6 +112,12 @@ impl GifRecorder {
     /// Returns `Ok(false)` once the size budget is reached; the caller should
     /// stop the recording.
     pub fn push_frame(&mut self, frame: &Bitmap, timestamp: Duration) -> Result<bool> {
+        self.push_owned(frame.clone(), timestamp)
+    }
+
+    /// [`push_frame`](Self::push_frame) for a frame the caller no longer needs,
+    /// which saves the copy the RGBA conversion would otherwise make.
+    pub fn push_owned(&mut self, frame: Bitmap, timestamp: Duration) -> Result<bool> {
         if self.truncated {
             return Ok(false);
         }
@@ -223,8 +232,8 @@ impl GifRecorder {
     }
 
     /// Converts a frame to RGBA and fits it to the recording extent.
-    fn fit_frame(&self, frame: &Bitmap) -> Result<Bitmap> {
-        let mut rgba = frame.clone();
+    fn fit_frame(&self, frame: Bitmap) -> Result<Bitmap> {
+        let mut rgba = frame;
         rgba.convert_to(PixelFormat::Rgba8);
 
         // Later frames must match the canvas the header declared, even if the
@@ -248,6 +257,148 @@ impl GifRecorder {
     /// Frames written so far, for the recorder overlay.
     pub fn frame_count(&self) -> u64 {
         self.frames
+    }
+}
+
+/// A [`GifRecorder`] running on its own thread behind a short, fixed queue.
+///
+/// NeuQuant is the slowest step of a recording, and quantising on the capture
+/// thread made every slow frame cost the next capture tick. The queue holds at
+/// most [`GifWorker::QUEUE_FRAMES`] frames: when the encoder falls behind, new
+/// frames are dropped rather than queued, so memory stays bounded however long
+/// the recording runs. Frame delays come from timestamps, so a dropped frame
+/// shortens nothing; the previous frame simply stays on screen longer.
+pub struct GifWorker {
+    frames: Option<SyncSender<(Bitmap, Duration)>>,
+    thread: Option<std::thread::JoinHandle<GifRecorder>>,
+    /// Set once the worker stops accepting frames: budget reached or failed.
+    stopped: Arc<AtomicBool>,
+    error: Arc<Mutex<Option<Error>>>,
+    dropped: u64,
+}
+
+impl GifWorker {
+    /// Frames that may wait for the encoder before new ones are dropped.
+    pub const QUEUE_FRAMES: usize = 2;
+
+    /// Moves `recorder` onto a new encoder thread.
+    pub fn spawn(mut recorder: GifRecorder) -> Result<Self> {
+        let (sender, receiver) = sync_channel::<(Bitmap, Duration)>(Self::QUEUE_FRAMES);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let error = Arc::new(Mutex::new(None));
+        let thread = {
+            let stopped = Arc::clone(&stopped);
+            let error = Arc::clone(&error);
+            std::thread::Builder::new()
+                .name("kova-gif-encoder".into())
+                .spawn(move || {
+                    while let Ok((frame, timestamp)) = receiver.recv() {
+                        match recorder.push_owned(frame, timestamp) {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(err) => {
+                                if let Ok(mut slot) = error.lock() {
+                                    *slot = Some(err);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    stopped.store(true, Ordering::Release);
+                    recorder
+                })
+                .map_err(|e| Error::Encode(format!("could not start the gif encoder: {e}")))?
+        };
+        Ok(Self {
+            frames: Some(sender),
+            thread: Some(thread),
+            stopped,
+            error,
+            dropped: 0,
+        })
+    }
+
+    /// Queues one frame without waiting for the encoder.
+    ///
+    /// Returns `Ok(false)` once the encoder has stopped accepting frames, the
+    /// same contract as [`GifRecorder::push_frame`]. An encoder failure is
+    /// returned from the next call after it happened.
+    pub fn push_frame(&mut self, frame: &Bitmap, timestamp: Duration) -> Result<bool> {
+        if let Some(err) = self.take_error() {
+            return Err(err);
+        }
+        if self.stopped.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        let Some(frames) = &self.frames else {
+            return Ok(false);
+        };
+        match frames.try_send((frame.clone(), timestamp)) {
+            Ok(()) => Ok(true),
+            Err(TrySendError::Full(_)) => {
+                self.dropped += 1;
+                Ok(true)
+            }
+            Err(TrySendError::Disconnected(_)) => match self.take_error() {
+                Some(err) => Err(err),
+                None => Ok(false),
+            },
+        }
+    }
+
+    /// Frames dropped because the encoder was still busy.
+    pub fn dropped_frames(&self) -> u64 {
+        self.dropped
+    }
+
+    /// Encodes the queued frames, then flushes and closes the file.
+    pub fn finish(mut self) -> Result<GifSummary> {
+        let recorder = self.join()?;
+        if let Some(err) = self.take_error() {
+            // Already returned from `push_frame` in the usual case. The file is
+            // still closed, so the frames before the failure stay playable.
+            tracing::warn!(%err, "the gif encoder stopped early");
+        }
+        if self.dropped > 0 {
+            tracing::debug!(
+                dropped = self.dropped,
+                "gif frames dropped while the encoder was busy"
+            );
+        }
+        recorder.finish()
+    }
+
+    fn join(&mut self) -> Result<GifRecorder> {
+        // Closing the queue lets the worker drain it and return the recorder.
+        drop(self.frames.take());
+        self.thread
+            .take()
+            .ok_or_else(|| Error::Encode("the gif encoder was already finished".into()))?
+            .join()
+            .map_err(|_| Error::Encode("the gif encoder thread panicked".into()))
+    }
+
+    fn take_error(&self) -> Option<Error> {
+        self.error.lock().ok().and_then(|mut slot| slot.take())
+    }
+}
+
+impl Drop for GifWorker {
+    fn drop(&mut self) {
+        // An abandoned recording still gets its trailer, so the file plays.
+        if self.thread.is_some()
+            && let Ok(recorder) = self.join()
+        {
+            let _ = recorder.finish();
+        }
+    }
+}
+
+impl std::fmt::Debug for GifWorker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GifWorker")
+            .field("dropped", &self.dropped)
+            .finish_non_exhaustive()
     }
 }
 
@@ -336,6 +487,75 @@ impl<W: Write> Write for CountingWriter<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn worker_path(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("kova-gif-worker-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
+    }
+
+    #[test]
+    fn the_worker_encodes_every_frame_it_accepted_before_finishing() {
+        let path = worker_path("drain.gif");
+        let recorder = GifRecorder::create(&path, GifOptions::default()).unwrap();
+        let mut worker = GifWorker::spawn(recorder).unwrap();
+        for i in 0..12u64 {
+            let accepted = worker
+                .push_frame(&frame(64, 48, i as u8), Duration::from_millis(i * 66))
+                .unwrap();
+            assert!(accepted);
+        }
+        let dropped = worker.dropped_frames();
+        let summary = worker.finish().unwrap();
+        assert_eq!(summary.frames + dropped, 12);
+        assert!(summary.frames >= 1);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.ends_with(&[0x3b]), "the trailer is missing");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn the_worker_reports_the_budget_without_blocking_the_caller() {
+        let path = worker_path("budget.gif");
+        let options = GifOptions {
+            max_bytes: 0,
+            ..GifOptions::default()
+        };
+        let mut worker = GifWorker::spawn(GifRecorder::create(&path, options).unwrap()).unwrap();
+        assert!(
+            worker
+                .push_frame(&frame(32, 32, 1), Duration::ZERO)
+                .unwrap()
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while worker
+            .push_frame(&frame(32, 32, 2), Duration::from_millis(50))
+            .unwrap()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the budget was never reported"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let summary = worker.finish().unwrap();
+        assert!(summary.truncated);
+        assert_eq!(summary.frames, 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn dropping_the_worker_still_closes_the_file() {
+        let path = worker_path("dropped.gif");
+        let mut worker =
+            GifWorker::spawn(GifRecorder::create(&path, GifOptions::default()).unwrap()).unwrap();
+        worker
+            .push_frame(&frame(16, 16, 3), Duration::ZERO)
+            .unwrap();
+        drop(worker);
+        assert!(std::fs::read(&path).unwrap().ends_with(&[0x3b]));
+        std::fs::remove_file(path).unwrap();
+    }
 
     fn frame(width: u32, height: u32, tint: u8) -> Bitmap {
         let mut data = Vec::with_capacity((width * height * 4) as usize);
